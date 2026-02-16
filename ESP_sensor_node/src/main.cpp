@@ -176,8 +176,6 @@ unsigned long lastReconnectAttempt = 0;
 // ===== GLOBAL VARIABLES =====
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
-// Increase MQTT buffer size to 1024 bytes for larger JSON payloads
-mqttClient.setBufferSize(1024);
 bool wifiConnected = false;
 bool mqttConnected = false;
 
@@ -223,6 +221,7 @@ void setup() {
     
     // Setup MQTT
     mqttClient.setServer(mqttBroker, mqttPort);
+    mqttClient.setBufferSize(1024);  // Increase buffer size for larger JSON payloads
     
     // Print circuit wiring information
     Serial.println(F("CIRCUIT WIRING:"));
@@ -542,10 +541,8 @@ void sendSensorData(float mq135_vocPPM, float mq135_nh3PPM,
     char jsonBuffer[512];
     serializeJson(doc, jsonBuffer);
     
-    // Publish to MQTT topic with QoS 1 for reliable delivery
-    // Use explicit length parameter for better compatibility
-    int payloadLength = strlen(jsonBuffer);
-    if (mqttClient.publish(mqttTopic, jsonBuffer, payloadLength, false)) {
+    // Publish to MQTT topic
+    if (mqttClient.publish(mqttTopic, jsonBuffer)) {
         Serial.println(F("Data sent via MQTT successfully"));
     } else {
         Serial.println(F("Failed to send data via MQTT"));
@@ -554,7 +551,7 @@ void sendSensorData(float mq135_vocPPM, float mq135_nh3PPM,
         Serial.print(F("MQTT state: "));
         Serial.println(mqttClient.state());
         Serial.print(F("Payload length: "));
-        Serial.println(payloadLength);
+        Serial.println(strlen(jsonBuffer));
         Serial.print(F("Free heap: "));
         Serial.println(ESP.getFreeHeap());
     }
