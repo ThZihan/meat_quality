@@ -51,6 +51,7 @@ class SimpleMQTTClient:
         
         self.connected = False
         self.last_message = None
+        self.last_message_time = None  # Track when last message was received
         self._loop_started = False  # Track if loop_start has been called
         
         # Callbacks
@@ -109,6 +110,9 @@ class SimpleMQTTClient:
             payload = msg.payload.decode('utf-8')
             
             logger.debug(f"Received message on topic '{topic}': {payload}")
+            
+            # Update last message time for all messages
+            self.last_message_time = time.time()
             
             # Process sensor data messages
             if topic == self.topic:
@@ -244,13 +248,13 @@ class SimpleMQTTClient:
             # Extract gas sensor values from nested sensors object
             h2s = sensors.get('mq136_h2s', 0.0)
             nh3 = sensors.get('mq137_nh3', 0.0)
-            co2 = sensors.get('mq135_co2', 0.0)
+            voc = sensors.get('mq135_co2', 0.0)
             temp = sensors.get('temperature', 0.0)
             humidity = sensors.get('humidity', 0.0)
             quality = quality_data.get('level', 'UNKNOWN')
             
             logger.info(f"Processed sensor data: H2S={h2s:.2f}ppm, NH3={nh3:.2f}ppm, "
-                       f"CO2={co2:.2f}ppm, Temp={temp:.1f}°C, "
+                       f"VOC={voc:.2f}ppm, Temp={temp:.1f}°C, "
                        f"Humidity={humidity:.1f}%, Quality={quality}")
             
             # Save to database
@@ -259,7 +263,7 @@ class SimpleMQTTClient:
                 'device_id': 'ESP32-Sensor',
                 'temperature': temp,
                 'humidity': humidity,
-                'mq135_co2': co2,
+                'mq135_co2': voc,
                 'mq136_h2s': h2s,
                 'mq137_nh3': nh3,
                 'quality_level': quality
@@ -273,6 +277,22 @@ class SimpleMQTTClient:
     def is_connected(self) -> bool:
         """Check if MQTT client is connected."""
         return self.connected
+    
+    def is_data_receiving(self, timeout_seconds: float = 10.0) -> bool:
+        """
+        Check if data is being received within the specified timeout.
+        
+        Args:
+            timeout_seconds: Maximum time in seconds since last message to consider data receiving
+        
+        Returns:
+            True if data was received within timeout, False otherwise
+        """
+        if self.last_message_time is None:
+            return False
+        
+        time_since_last_message = time.time() - self.last_message_time
+        return time_since_last_message <= timeout_seconds
     
     def set_message_callback(self, callback: Callable):
         """Set callback for received messages."""
@@ -344,28 +364,28 @@ def map_quality_level(esp_quality: str) -> str:
     return config.QUALITY_LEVEL_MAP.get(esp_quality, "WARNING")
 
 
-def determine_gas_status(h2s: float, nh3: float, co2: float) -> str:
+def determine_gas_status(h2s: float, nh3: float, voc: float) -> str:
     """
     Determine gas status based on sensor readings.
     
     Args:
         h2s: H2S reading in ppm
         nh3: NH3 reading in ppm
-        co2: CO2 reading in ppm
+        voc: VOC reading in ppm
     
     Returns:
         Gas status: LOW, HIGH, or CRITICAL
     """
     # Check for critical levels
-    if (h2s >= config.H2S_CRITICAL_THRESHOLD or 
-        nh3 >= config.NH3_CRITICAL_THRESHOLD or 
-        co2 >= config.CO2_CRITICAL_THRESHOLD):
+    if (h2s >= config.H2S_CRITICAL_THRESHOLD or
+        nh3 >= config.NH3_CRITICAL_THRESHOLD or
+        voc >= config.VOC_CRITICAL_THRESHOLD):
         return "CRITICAL"
     
     # Check for warning levels
-    if (h2s >= config.H2S_WARNING_THRESHOLD or 
-        nh3 >= config.NH3_WARNING_THRESHOLD or 
-        co2 >= config.CO2_WARNING_THRESHOLD):
+    if (h2s >= config.H2S_WARNING_THRESHOLD or
+        nh3 >= config.NH3_WARNING_THRESHOLD or
+        voc >= config.VOC_WARNING_THRESHOLD):
         return "HIGH"
     
     return "LOW"

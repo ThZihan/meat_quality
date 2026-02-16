@@ -189,13 +189,13 @@ class MQTTSubscriber:
             # Extract gas sensor values from nested sensors object
             h2s = sensors.get('mq136_h2s', 0.0)
             nh3 = sensors.get('mq137_nh3', 0.0)
-            co2 = sensors.get('mq135_co2', 0.0)
+            voc = sensors.get('mq135_co2', 0.0)
             temp = sensors.get('temperature', 0.0)
             humidity = sensors.get('humidity', 0.0)
             quality = quality_data.get('level', 'UNKNOWN')
             
             logger.info(f"Processed sensor data: H2S={h2s:.2f}ppm, NH3={nh3:.2f}ppm, "
-                       f"CO2={co2:.2f}ppm, Temp={temp:.1f}°C, "
+                       f"VOC={voc:.2f}ppm, Temp={temp:.1f}°C, "
                        f"Humidity={humidity:.1f}%, Quality={quality}")
             
             # Save to database
@@ -204,7 +204,7 @@ class MQTTSubscriber:
                 'device_id': 'ESP32-Sensor',
                 'temperature': temp,
                 'humidity': humidity,
-                'mq135_co2': co2,
+                'mq135_co2': voc,
                 'mq136_h2s': h2s,
                 'mq137_nh3': nh3,
                 'quality_level': quality

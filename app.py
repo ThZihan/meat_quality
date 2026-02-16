@@ -107,7 +107,7 @@ if 'simulation_running' not in st.session_state:
     
 if 'history' not in st.session_state:
     st.session_state.history = pd.DataFrame(columns=[
-        'timestamp', 'h2s_ppm', 'nh3_ppm', 'co2_ppm', 'temp_c', 'humidity', 'quality_level'
+        'timestamp', 'h2s_ppm', 'nh3_ppm', 'voc_ppm', 'temp_c', 'humidity', 'quality_level'
     ])
     
 if 'last_update' not in st.session_state:
@@ -153,7 +153,7 @@ with st.sidebar:
     if data_mode != st.session_state.data_mode:
         st.session_state.data_mode = data_mode
         st.session_state.history = pd.DataFrame(columns=[
-            'timestamp', 'h2s_ppm', 'nh3_ppm', 'co2_ppm', 'temp_c', 'humidity', 'quality_level'
+            'timestamp', 'h2s_ppm', 'nh3_ppm', 'voc_ppm', 'temp_c', 'humidity', 'quality_level'
         ])
         st.rerun()
     
@@ -164,7 +164,8 @@ with st.sidebar:
         # Poll for MQTT messages (simplified client uses polling)
         mqtt_client.poll(timeout=0.5)
         
-        st.session_state.mqtt_connected = mqtt_client.is_connected()
+        # Check if data is being received (within 10 seconds)
+        st.session_state.mqtt_connected = mqtt_client.is_data_receiving(timeout_seconds=10.0)
         
         if st.session_state.mqtt_connected:
             st.success("✅ MQTT Connected")
@@ -210,17 +211,17 @@ with st.sidebar:
     
     st.divider()
     
-    # Reset button
-    if st.button("🔄 Reset Data"):
-        if st.session_state.data_mode == 'mock':
+    # Reset button (only for mock mode)
+    if st.session_state.data_mode == 'mock':
+        if st.button("🔄 Reset Data"):
             reset_simulation()
-        st.session_state.history = pd.DataFrame(columns=[
-            'timestamp', 'h2s_ppm', 'nh3_ppm', 'co2_ppm', 'temp_c', 'humidity', 'quality_level'
-        ])
-        st.session_state.visual_prediction = None
-        st.session_state.uploaded_image = None
-        st.session_state.uploaded_image_bytes = None
-        st.success("Data reset!")
+            st.session_state.history = pd.DataFrame(columns=[
+                'timestamp', 'h2s_ppm', 'nh3_ppm', 'voc_ppm', 'temp_c', 'humidity', 'quality_level'
+            ])
+            st.session_state.visual_prediction = None
+            st.session_state.uploaded_image = None
+            st.session_state.uploaded_image_bytes = None
+            st.success("Data reset!")
     
     st.divider()
     
@@ -247,7 +248,7 @@ with st.sidebar:
                     cursor = conn.cursor()
                     cursor.execute('''
                         SELECT id, timestamp, device_id, temperature, humidity,
-                               mq135_co2, mq136_h2s, mq137_nh3, quality_level, wifi_rssi
+                               mq135_co2, mq136_h2s, mq137_nh3, quality_level
                         FROM sensor_readings
                         ORDER BY timestamp ASC
                     ''')
@@ -260,8 +261,8 @@ with st.sidebar:
                     
                     # Write header
                     writer.writerow(['ID', 'Timestamp', 'Device ID', 'Temperature (°C)',
-                                   'Humidity (%)', 'CO2 (ppm)', 'H2S (ppm)', 'NH3 (ppm)',
-                                   'Quality Level', 'WiFi RSSI'])
+                                   'Humidity (%)', 'VOC (ppm)', 'H2S (ppm)', 'NH3 (ppm)',
+                                   'Quality Level'])
                     
                     # Write data rows
                     for row in rows:
@@ -274,8 +275,7 @@ with st.sidebar:
                             row['mq135_co2'],
                             row['mq136_h2s'],
                             row['mq137_nh3'],
-                            row['quality_level'],
-                            row['wifi_rssi']
+                            row['quality_level']
                         ])
                     
                     return output.getvalue()
@@ -288,6 +288,24 @@ with st.sidebar:
                 mime="text/csv",
                 width='stretch'
             )
+            
+            # Delete all data button (only for MQTT mode)
+            if st.session_state.data_mode == 'mqtt':
+                if st.button("🗑️ Delete All Data", type="secondary"):
+                    db = get_db_manager()
+                    result = db.delete_all_data()
+                    
+                    if 'error' in result:
+                        st.error(f"Error deleting data: {result['error']}")
+                    else:
+                        st.success(f"✅ Deleted {result['sensor_readings']} sensor readings, "
+                                  f"{result['visual_predictions']} visual predictions, "
+                                  f"{result['fusion_decisions']} fusion decisions")
+                        # Clear session state history
+                        st.session_state.history = pd.DataFrame(columns=[
+                            'timestamp', 'h2s_ppm', 'nh3_ppm', 'voc_ppm', 'temp_c', 'humidity', 'quality_level'
+                        ])
+                        st.rerun()
     
     # Thresholds info
     st.subheader("📊 Gas Thresholds")
@@ -302,10 +320,10 @@ with st.sidebar:
     - Warning: {config.NH3_FRESH_THRESHOLD}-{config.NH3_WARNING_THRESHOLD} ppm
     - Critical: > {config.NH3_WARNING_THRESHOLD} ppm
     
-    **CO2 (MQ135):**
-    - Fresh: < {config.CO2_FRESH_THRESHOLD} ppm
-    - Warning: {config.CO2_FRESH_THRESHOLD}-{config.CO2_WARNING_THRESHOLD} ppm
-    - Critical: > {config.CO2_WARNING_THRESHOLD} ppm
+    **VOC (MQ135):**
+    - Fresh: < {config.VOC_FRESH_THRESHOLD} ppm
+    - Warning: {config.VOC_FRESH_THRESHOLD}-{config.VOC_WARNING_THRESHOLD} ppm
+    - Critical: > {config.VOC_WARNING_THRESHOLD} ppm
     """)
 
 
@@ -337,7 +355,7 @@ if st.session_state.data_mode == 'mock' and st.session_state.simulation_running:
             'timestamp': pd.Timestamp.now(),
             'h2s_ppm': readings['h2s_ppm'],
             'nh3_ppm': readings['ammonia_ppm'],  # Map ammonia to nh3
-            'co2_ppm': readings['methane_ppm'],  # Map methane to co2 for display
+            'voc_ppm': readings['methane_ppm'],  # Map methane to voc for display
             'temp_c': readings['temp_c'],
             'humidity': readings['humidity'],
             'quality_level': 'UNKNOWN'
@@ -368,7 +386,7 @@ elif st.session_state.data_mode == 'mqtt':
                     'timestamp': pd.to_datetime(reading['timestamp']),
                     'h2s_ppm': reading['mq136_h2s'],
                     'nh3_ppm': reading['mq137_nh3'],
-                    'co2_ppm': reading['mq135_co2'],
+                    'voc_ppm': reading['mq135_co2'],
                     'temp_c': reading['temperature'],
                     'humidity': reading['humidity'],
                     'quality_level': reading['quality_level']
@@ -387,7 +405,7 @@ else:
     current = {
         'h2s_ppm': 0.0,
         'nh3_ppm': 0.0,
-        'co2_ppm': 0.0,
+        'voc_ppm': 0.0,
         'temp_c': 0.0,
         'humidity': 0.0,
         'quality_level': 'UNKNOWN'
@@ -420,17 +438,28 @@ with left_col:
     col_btn1, col_btn2 = st.columns(2)
     with col_btn1:
         if st.button("📷 Capture Camera"):
-            # Capture image from real camera
-            with st.spinner("Capturing from camera..."):
-                # Use Pi Camera V2 if available, otherwise try V4L2
-                use_pi_v2 = check_pi_camera_v2_available()
-                camera_image_bytes = get_camera_image_bytes(camera_index=0, use_pi_camera_v2=use_pi_v2)
-                if camera_image_bytes is not None:
-                    st.session_state.uploaded_image_bytes = camera_image_bytes
+            # Capture image from real camera or use dummy image for mock mode
+            if st.session_state.data_mode == 'mock':
+                # Use dummy image for mock mode
+                try:
+                    with open("images/dummyImg.png", "rb") as f:
+                        st.session_state.uploaded_image_bytes = f.read()
                     st.session_state.uploaded_image = None
-                    st.success("Image captured successfully!")
-                else:
-                    st.error("Failed to capture image from camera. Please check camera connection.")
+                    st.success("Dummy image loaded for simulation!")
+                except FileNotFoundError:
+                    st.error("Dummy image not found. Please ensure images/dummyImg.png exists.")
+            else:
+                # Capture from real camera for MQTT mode
+                with st.spinner("Capturing from camera..."):
+                    # Use Pi Camera V2 if available, otherwise try V4L2
+                    use_pi_v2 = check_pi_camera_v2_available()
+                    camera_image_bytes = get_camera_image_bytes(camera_index=0, use_pi_camera_v2=use_pi_v2)
+                    if camera_image_bytes is not None:
+                        st.session_state.uploaded_image_bytes = camera_image_bytes
+                        st.session_state.uploaded_image = None
+                        st.success("Image captured successfully!")
+                    else:
+                        st.error("Failed to capture image from camera. Please check camera connection.")
     
     with col_btn2:
         if st.button("🔄 Clear Image"):
@@ -452,8 +481,19 @@ with left_col:
     
     if st.session_state.uploaded_image_bytes is not None:
         if st.session_state.simulation_running or st.button("🔍 Run CNN Prediction"):
-            prediction = predict_image()
-            st.session_state.visual_prediction = prediction
+            if st.session_state.data_mode == 'mock':
+                # Use dummy prediction for mock mode
+                prediction = {
+                    'species': 'Beef',
+                    'visual_status': 'Fresh',
+                    'confidence': '92.5%'
+                }
+                st.session_state.visual_prediction = prediction
+                st.info("Showing dummy prediction for simulation mode.")
+            else:
+                # Use actual CNN prediction for MQTT mode
+                prediction = predict_image()
+                st.session_state.visual_prediction = prediction
     
     if st.session_state.visual_prediction:
         pred = st.session_state.visual_prediction
@@ -503,13 +543,13 @@ with right_col:
                     unsafe_allow_html=True)
     
     with col3:
-        co2_color = get_color(current['co2_ppm'], config.CO2_FRESH_THRESHOLD, config.CO2_WARNING_THRESHOLD)
+        voc_color = get_color(current['voc_ppm'], config.VOC_FRESH_THRESHOLD, config.VOC_WARNING_THRESHOLD)
         st.metric(
-            label="CO2 (MQ135)",
-            value=f"{current['co2_ppm']:.2f} ppm",
+            label="VOC (MQ135)",
+            value=f"{current['voc_ppm']:.2f} ppm",
             delta_color="normal"
         )
-        st.markdown(f"<div style='height: 5px; background-color: {co2_color}; border-radius: 3px;'></div>",
+        st.markdown(f"<div style='height: 5px; background-color: {voc_color}; border-radius: 3px;'></div>",
                     unsafe_allow_html=True)
     
     # Environmental Metrics
@@ -609,7 +649,7 @@ visual_status = st.session_state.visual_prediction['visual_status'] if st.sessio
 gas_readings = {
     'h2s_ppm': current['h2s_ppm'],
     'methane_ppm': current['nh3_ppm'],  # Map NH3 to methane for fusion logic
-    'ammonia_ppm': current['co2_ppm']  # Map CO2 to ammonia for fusion logic
+    'ammonia_ppm': current['voc_ppm']  # Map VOC to ammonia for fusion logic
 }
 
 # Get fusion decision from mock_data module
@@ -669,13 +709,13 @@ with fusion_col3:
     st.markdown("### Gas Result")
     
     # Determine gas status using the new function
-    gas_status = determine_gas_status(current['h2s_ppm'], current['nh3_ppm'], current['co2_ppm'])
+    gas_status = determine_gas_status(current['h2s_ppm'], current['nh3_ppm'], current['voc_ppm'])
     gas_color = config.QUALITY_COLORS.get(gas_status, "#FF9800")
     
     st.markdown(f"<div style='color: {gas_color}; font-size: 1.5rem; font-weight: bold;'>{gas_status}</div>", unsafe_allow_html=True)
     st.markdown(f"**H2S:** {current['h2s_ppm']:.2f} ppm")
     st.markdown(f"**NH3:** {current['nh3_ppm']:.2f} ppm")
-    st.markdown(f"**CO2:** {current['co2_ppm']:.2f} ppm")
+    st.markdown(f"**VOC:** {current['voc_ppm']:.2f} ppm")
 
 
 # ==================== CORRELATION HEATMAP ====================
@@ -686,7 +726,7 @@ with col_left:
     st.subheader("🔥 Correlation Heatmap")
     if len(st.session_state.history) > 10:
         # Calculate correlation matrix
-        corr_data = st.session_state.history[['h2s_ppm', 'nh3_ppm', 'co2_ppm', 'temp_c', 'humidity']].corr()
+        corr_data = st.session_state.history[['h2s_ppm', 'nh3_ppm', 'voc_ppm', 'temp_c', 'humidity']].corr()
         
         # Create heatmap using seaborn
         fig, ax = plt.subplots(figsize=(8, 6))
@@ -733,13 +773,13 @@ with col_right:
     </div>
     """, unsafe_allow_html=True)
     
-    st.markdown("### CO2 (MQ135)")
-    co2_percent = min(100, (current['co2_ppm'] / config.CO2_WARNING_THRESHOLD) * 100)
-    co2_bar_color = config.QUALITY_COLORS["SAFE"] if current['co2_ppm'] < config.CO2_FRESH_THRESHOLD else config.QUALITY_COLORS["WARNING"] if current['co2_ppm'] < config.CO2_WARNING_THRESHOLD else config.QUALITY_COLORS["SPOILED"]
+    st.markdown("### VOC (MQ135)")
+    voc_percent = min(100, (current['voc_ppm'] / config.VOC_WARNING_THRESHOLD) * 100)
+    voc_bar_color = config.QUALITY_COLORS["SAFE"] if current['voc_ppm'] < config.VOC_FRESH_THRESHOLD else config.QUALITY_COLORS["WARNING"] if current['voc_ppm'] < config.VOC_WARNING_THRESHOLD else config.QUALITY_COLORS["SPOILED"]
     st.markdown(f"""
     <div style='background-color: #e0e0e0; border-radius: 10px; height: 25px; overflow: hidden;'>
-        <div style='background-color: {co2_bar_color}; width: {co2_percent}%; height: 100%; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold;'>
-            {current['co2_ppm']:.2f} ppm / {config.CO2_WARNING_THRESHOLD} ppm
+        <div style='background-color: {voc_bar_color}; width: {voc_percent}%; height: 100%; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold;'>
+            {current['voc_ppm']:.2f} ppm / {config.VOC_WARNING_THRESHOLD} ppm
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -750,8 +790,14 @@ st.divider()
 st.markdown(f"""
 <div style='text-align: center; color: #666;'>
     <p>🥩 Multi-Modal Meat Quality Monitoring System | Computer Vision + Gas Sensors</p>
-    <p>Sensors: MQ136 (H2S), MQ137 (NH3), MQ135 (CO2), AHT10 (Temp/Humidity)</p>
+    <p>Sensors: MQ136 (H2S), MQ137 (NH3), MQ135 (VOC), AHT10 (Temp/Humidity)</p>
     <p>Data Mode: <strong>{'MQTT (Real Sensors)' if st.session_state.data_mode == 'mqtt' else 'Mock (Simulation)'}</strong></p>
+    <p style='margin-top: 20px;'>
+        © 2025 Tahfizul Hasan Zihan. All Rights Reserved.<br/>
+        <a href='https://github.com/ThZihan/meat_quality/tree/master' target='_blank' style='color: #666; text-decoration: none;'>
+            🔗 GitHub: https://github.com/ThZihan/meat_quality/tree/master
+        </a>
+    </p>
 </div>
 """, unsafe_allow_html=True)
 

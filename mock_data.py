@@ -1,6 +1,6 @@
 """
 Mock Data Simulation Module for Meat Quality Monitoring System
-Simulates realistic sensor readings for MQ136 (H2S), MQ4 (Methane), MQ135 (Ammonia/CO2), and DHT11 (Temp/Humidity)
+Simulates realistic sensor readings for MQ136 (H2S), MQ4 (Methane), MQ135 (VOC), and DHT11 (Temp/Humidity)
 Multi-Modal System: Gas Sensors + Computer Vision
 """
 
@@ -16,7 +16,7 @@ class MeatDecaySimulator:
     Logic:
     - H2S (MQ136) and Methane (MQ4) trend upward over time (simulating spoilage)
     - Higher temperatures accelerate gas production
-    - Ammonia (MQ135) shows general air quality variations
+    - VOC (MQ135) shows general air quality variations
     - All values include realistic sensor noise
     """
     

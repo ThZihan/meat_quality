@@ -324,28 +324,28 @@ def map_quality_level(esp_quality: str) -> str:
     return config.QUALITY_LEVEL_MAP.get(esp_quality, "WARNING")
 
 
-def determine_gas_status(h2s: float, nh3: float, co2: float) -> str:
+def determine_gas_status(h2s: float, nh3: float, voc: float) -> str:
     """
     Determine gas status based on sensor readings.
     
     Args:
         h2s: H2S reading in ppm
         nh3: NH3 reading in ppm
-        co2: CO2 reading in ppm
+        voc: VOC reading in ppm
     
     Returns:
         Gas status: LOW, HIGH, or CRITICAL
     """
     # Check for critical levels
-    if (h2s >= config.H2S_CRITICAL_THRESHOLD or 
-        nh3 >= config.NH3_CRITICAL_THRESHOLD or 
-        co2 >= config.CO2_CRITICAL_THRESHOLD):
+    if (h2s >= config.H2S_CRITICAL_THRESHOLD or
+        nh3 >= config.NH3_CRITICAL_THRESHOLD or
+        voc >= config.VOC_CRITICAL_THRESHOLD):
         return "CRITICAL"
     
     # Check for warning levels
-    if (h2s >= config.H2S_WARNING_THRESHOLD or 
-        nh3 >= config.NH3_WARNING_THRESHOLD or 
-        co2 >= config.CO2_WARNING_THRESHOLD):
+    if (h2s >= config.H2S_WARNING_THRESHOLD or
+        nh3 >= config.NH3_WARNING_THRESHOLD or
+        voc >= config.VOC_WARNING_THRESHOLD):
         return "HIGH"
     
     return "LOW"

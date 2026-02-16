@@ -46,10 +46,10 @@ NH3_FRESH_THRESHOLD = 25.0      # Fresh: < 25 ppm
 NH3_WARNING_THRESHOLD = 100.0   # Warning: 25-100 ppm
 NH3_CRITICAL_THRESHOLD = 200.0  # Critical: > 100 ppm
 
-# CO2 (MQ135) Thresholds in ppm
-CO2_FRESH_THRESHOLD = 400.0     # Fresh: < 400 ppm
-CO2_WARNING_THRESHOLD = 800.0   # Warning: 400-800 ppm
-CO2_CRITICAL_THRESHOLD = 1200.0  # Critical: > 800 ppm
+# VOC (MQ135) Thresholds in ppm
+VOC_FRESH_THRESHOLD = 600.0     # Fresh: < 600 ppm
+VOC_WARNING_THRESHOLD = 1000.0   # Warning: 600-1000 ppm
+VOC_CRITICAL_THRESHOLD = 1200.0  # Critical: > 1000 ppm
 
 # Temperature thresholds (°C)
 TEMP_OPTIMAL_MIN = 0.0    # Optimal storage temperature minimum
@@ -123,7 +123,7 @@ MOCK_TEMP_DEFAULT = 3.5  # Default temperature for mock data (°C)
 MOCK_HUMIDITY_DEFAULT = 75.0  # Default humidity for mock data (%)
 MOCK_H2S_DEFAULT = 5.0  # Default H2S for mock data (ppm)
 MOCK_NH3_DEFAULT = 15.0  # Default NH3 for mock data (ppm)
-MOCK_CO2_DEFAULT = 450.0  # Default CO2 for mock data (ppm)
+MOCK_VOC_DEFAULT = 450.0  # Default VOC for mock data (ppm)
 
 # ============================================================================
 # Advanced Settings

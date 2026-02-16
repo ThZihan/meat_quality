@@ -57,7 +57,7 @@ class DatabaseManager:
                     device_id TEXT NOT NULL,
                     temperature REAL NOT NULL,
                     humidity REAL NOT NULL,
-                    mq135_co2 REAL NOT NULL,
+                    mq135_co2 REAL NOT NULL,  -- VOC data from MQ135 sensor
                     mq136_h2s REAL NOT NULL,
                     mq137_nh3 REAL NOT NULL,
                     quality_level TEXT NOT NULL,
@@ -108,7 +108,7 @@ class DatabaseManager:
                   - device_id (str)
                   - temperature (float)
                   - humidity (float)
-                  - mq135_co2 (float)
+                  - mq135_co2 (float)  -- VOC data from MQ135 sensor
                   - mq136_h2s (float)
                   - mq137_nh3 (float)
                   - quality_level (str)
@@ -431,6 +431,49 @@ class DatabaseManager:
                 
         except Exception as e:
             logger.error(f"Error cleaning up old data: {e}")
+    
+    def delete_all_data(self) -> dict:
+        """
+        Delete all data from all tables.
+        
+        Returns:
+            Dictionary with counts of deleted records
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Delete all sensor readings
+                cursor.execute('DELETE FROM sensor_readings')
+                sensor_deleted = cursor.rowcount
+                
+                # Delete all visual predictions
+                cursor.execute('DELETE FROM visual_predictions')
+                visual_deleted = cursor.rowcount
+                
+                # Delete all fusion decisions
+                cursor.execute('DELETE FROM fusion_decisions')
+                fusion_deleted = cursor.rowcount
+                
+                conn.commit()
+                
+                logger.info(f"All data deleted: {sensor_deleted} sensor readings, "
+                          f"{visual_deleted} visual predictions, {fusion_deleted} fusion decisions")
+                
+                return {
+                    'sensor_readings': sensor_deleted,
+                    'visual_predictions': visual_deleted,
+                    'fusion_decisions': fusion_deleted
+                }
+                
+        except Exception as e:
+            logger.error(f"Error deleting all data: {e}")
+            return {
+                'sensor_readings': 0,
+                'visual_predictions': 0,
+                'fusion_decisions': 0,
+                'error': str(e)
+            }
     
     def export_to_csv(self, output_path: str = None, hours: int = 24) -> str:
         """
