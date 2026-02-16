@@ -143,9 +143,9 @@ const int ADC_RESOLUTION = 4095;  // 12-bit ADC
 const float RL = 10000.0;  // 10kΩ
 
 // Sensor resistance in clean air (UPDATE THESE AFTER CALIBRATION!)
-const float MQ135_R0 = 20000.0;  // Default: 192kΩ (update after calibration)
-const float MQ136_R0 = 20000.0;    // Default: 20kΩ (update after calibration)
-const float MQ137_R0 = 25000.0;    // Default: 25kΩ (update after calibration)
+const float MQ135_R0 = 193200.00;  // From 24-Hour Burn-in
+const float MQ136_R0 = 85102.55;   // From 24-Hour Burn-in
+const float MQ137_R0 = 51913.09;   // From 24-Hour Burn-in
 
 // MQ135 sensitivity curve parameters (from datasheet)
 const float MQ135_CO2_A = 110.47;
