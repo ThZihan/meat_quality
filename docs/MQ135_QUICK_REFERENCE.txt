@@ -1,0 +1,193 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║         MQ135 SENSOR QUICK REFERENCE - ESP32 NODEMCU                          ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ CIRCUIT DIAGRAM                                                               │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+    MQ135 MODULE                 VOLTAGE DIVIDER              ESP32 NODEMCU
+    ┌─────────┐                 ┌──────────────┐             ┌─────────────┐
+    │         │                 │              │             │             │
+    │ VCC ────┼───── 5V ────────┤              │             │             │
+    │         │                 │              │             │             │
+    │ GND ────┼───── GND ───────┼───────┬──────┼──── GND ────┤             │
+    │         │                 │       │      │             │             │
+    │ AOUT ───┼─────────────────┼───┬───┼──────┼─────────────┤ GPIO 34     │
+    │         │                 │   │   │      │             │ (ADC1_CH6)  │
+    └─────────┘                 │   │   │      │             │             │
+                                │  [R1] │      │             │             │
+                                │ 10kΩ  │      │             │             │
+                                │       │      │             │             │
+                                │       ├──[R2]┼─── GND ─────┤             │
+                                │       │ 10kΩ  │             │             │
+                                │       │      │             │             │
+                                └───────┼──────┘             └─────────────┘
+                                        │
+                                        │ 0-2.5V (Safe for ESP32)
+                                        │
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ VOLTAGE DIVIDER CALCULATION                                                   │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+    Input:  0-5V from MQ135
+    Output: 0-2.5V to ESP32
+    Ratio:  1:2 (divide by 2)
+
+    Formula: Vout = Vin × (R2 / (R1 + R2))
+             Vout = Vin × (10k / 20k) = Vin × 0.5
+
+    Safety:  ESP32 ADC max = 3.3V
+             Divider output = 2.5V max
+             Headroom = 0.8V (24% safety margin)
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ PIN CONNECTIONS                                                               │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+    MQ135 SENSOR:
+    ─────────────
+    VCC  → 5V (external or NodeMCU 5V pin)
+    GND  → GND (common with ESP32)
+    AOUT → Voltage divider input (10kΩ resistor)
+
+    VOLTAGE DIVIDER:
+    ────────────────
+    Input  → MQ135 AOUT
+    R1     → 10kΩ resistor (in series)
+    R2     → 10kΩ resistor (to ground)
+    Output → Between R1 and R2 → ESP32 GPIO 34
+
+    ESP32 NODEMCU:
+    ─────────────
+    GPIO 34 → Voltage divider output (ADC1_CH6)
+    GND     → Common ground
+    3.3V    → Not used (MQ135 powered by 5V)
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ SAFE ADC PINS (ADC1 - Works with WiFi)                                       │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+    GPIO 34 (ADC1_CH6) ← RECOMMENDED
+    GPIO 35 (ADC1_CH7)
+    GPIO 36 (ADC1_CH0)
+    GPIO 39 (ADC1_CH3)
+
+    ⚠️  AVOID: GPIO 32, 33 (ADC2 - Conflicts with WiFi!)
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ COMPONENTS NEEDED                                                             │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+    ✓ MQ135 Sensor Module
+    ✓ ESP32 NodeMCU
+    ✓ 2 × 10kΩ resistors (1/4W)
+    ✓ Breadboard
+    ✓ Jumper wires
+    ✓ 5V power supply (500mA minimum)
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ CALIBRATION STEPS                                                             │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+    1. Upload code to ESP32
+    2. Set: bool calibrationMode = true;
+    3. Place sensor in clean air (outdoor)
+    4. Wait 5 minutes for stabilization
+    5. Read Serial Monitor (115200 baud)
+    6. Note the R0 value printed
+    7. Update: const float R0 = [YOUR_VALUE];
+    8. Set: bool calibrationMode = false;
+    9. Re-upload code
+
+    Typical R0 values: 10kΩ - 100kΩ (varies by sensor)
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ PREHEATING REQUIREMENTS                                                       │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+    Time      Accuracy    Notes
+    ──────────────────────────────────────────────────────
+    5 min     ~60%        Quick readings, not accurate
+    1 hour    ~80%        Acceptable for monitoring
+    24 hours  ~95%        Recommended for accuracy
+    48 hours  ~100%       Full accuracy achieved
+
+    ⚠️  Preheat for 24-48 hours before critical measurements!
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ MEAT QUALITY REFERENCE                                                        │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+    CO2 LEVELS (Freshness Indicator):
+    ─────────────────────────────────────
+    400-600 ppm  → FRESH      (Safe to consume)
+    600-800 ppm  → GOOD       (Monitor closely)
+    800-1000 ppm → MODERATE   (Consume soon)
+    >1000 ppm    → SPOILED    (Do not consume)
+
+    NH3 LEVELS (Protein Breakdown):
+    ─────────────────────────────────────
+    10-50 ppm    → FRESH      (Safe to consume)
+    50-100 ppm   → GOOD       (Monitor closely)
+    100-200 ppm  → MODERATE   (Consume soon)
+    >200 ppm     → SPOILED    (Do not consume)
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ SAFETY CHECKLIST                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+    Before powering on, verify:
+    ─────────────────────────────────────
+    □ Voltage divider installed (2x 10kΩ resistors)
+    □ Using ADC1 pin (GPIO 34, 35, 36, or 39)
+    □ Common ground established
+    □ MQ135 powered by 5V
+    □ NO direct 5V connection to ESP32 GPIO
+    □ All connections secure
+    □ Code uploaded and verified
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ TROUBLESHOOTING                                                               │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+    Problem: Readings always 0
+    → Check connections, verify GPIO pin, check 5V supply
+
+    Problem: Erratic readings
+    → Preheat sensor, check voltage divider, ensure common ground
+
+    Problem: Readings always maximum
+    → Install voltage divider! Check resistors are 10kΩ
+
+    Problem: ESP32 gets hot
+    → Disconnect power! Check for 5V on GPIO pin
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ CODE FILES                                                                     │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+    Main Code:      src/mq135_sensor.cpp
+    Wiring Guide:   docs/MQ135_WIRING_GUIDE.md
+    Quick Ref:      docs/MQ135_QUICK_REFERENCE.txt
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ BUILD COMMANDS                                                                │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+    Build only:
+    pio run -e esp32dev
+
+    Upload:
+    pio run -e esp32dev --target upload
+
+    Monitor Serial:
+    pio device monitor -b 115200
+
+    Build + Upload + Monitor:
+    pio run -e esp32dev --target upload && pio device monitor -b 115200
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  Version: 1.0 | Date: 2025-02-09 | For: Meat Quality Air Data Project        ║
+╚══════════════════════════════════════════════════════════════════════════════╝
