@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Camera Feed - Raspberry Pi Camera Module 3 (rpicam-vid)</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        /* Custom Scrollbar Styling */
+        ::-webkit-scrollbar {
+            width: 20px;
+        }
+        
+        ::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 10px;
+        }
+        
+        ::-webkit-scrollbar-thumb {
+            background: #ff4444;
+            border-radius: 10px;
+            border: 3px solid rgba(255, 255, 255, 0.05);
+        }
+        
+        ::-webkit-scrollbar-thumb:hover {
+            background: #ff6666;
+        }
+        
+        ::-webkit-scrollbar-thumb:active {
+            background: #cc0000;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            color: #ffffff;
+        }
+        
+        .container {
+            max-width: 900px;
+            width: 100%;
+        }
+        
+        header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            background: linear-gradient(90deg, #00d9ff, #00ff88);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .subtitle {
+            color: #a0a0a0;
+            font-size: 1rem;
+        }
+        
+        .camera-container {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 20px;
+            padding: 20px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .video-wrapper {
+            position: relative;
+            width: 100%;
+            border-radius: 12px;
+            overflow: hidden;
+            background: #000;
+        }
+        
+        #video-feed {
+            width: 100%;
+            height: auto;
+            display: block;
+            border-radius: 12px;
+        }
+        
+        .status-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 20px;
+            padding: 15px 20px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+        }
+        
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #00ff88;
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+                box-shadow: 0 0 0 0 rgba(0, 255, 136, 0.7);
+            }
+            50% {
+                opacity: 0.7;
+                box-shadow: 0 0 0 10px rgba(0, 255, 136, 0);
+            }
+        }
+        
+        .status-text {
+            color: #00ff88;
+            font-weight: 600;
+        }
+        
+        .camera-info {
+            display: flex;
+            gap: 20px;
+            font-size: 0.9rem;
+            color: #a0a0a0;
+        }
+        
+        .info-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        
+        .info-label {
+            color: #00d9ff;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+            justify-content: center;
+        }
+        
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .btn-refresh {
+            background: linear-gradient(135deg, #00d9ff, #0099cc);
+            color: #fff;
+        }
+        
+        .btn-refresh:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(0, 217, 255, 0.4);
+        }
+        
+        .btn-fullscreen {
+            background: linear-gradient(135deg, #ff4444, #cc0000);
+            color: #fff;
+        }
+        
+        .btn-fullscreen:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(255, 68, 68, 0.4);
+        }
+        
+        .btn-fullscreen.active {
+            background: linear-gradient(135deg, #ff6666, #ff4444);
+        }
+        
+        /* Fullscreen mode styles */
+        .fullscreen-mode .container {
+            max-width: 100%;
+            padding: 0;
+        }
+        
+        .fullscreen-mode .camera-container {
+            border-radius: 0;
+            padding: 0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+        
+        .fullscreen-mode .video-wrapper {
+            border-radius: 0;
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #000;
+        }
+        
+        .fullscreen-mode #video-feed {
+            max-height: 100vh;
+            width: auto;
+            max-width: 100%;
+            border-radius: 0;
+        }
+        
+        .fullscreen-mode header,
+        .fullscreen-mode .footer,
+        .fullscreen-mode .status-bar,
+        .fullscreen-mode .controls {
+            display: none;
+        }
+        
+        .fullscreen-mode .fullscreen-controls {
+            display: flex;
+            position: fixed;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 1000;
+        }
+        
+        .fullscreen-controls {
+            display: none;
+        }
+        
+        .footer {
+            margin-top: 30px;
+            text-align: center;
+            color: #606060;
+            font-size: 0.85rem;
+        }
+        
+        .error-message {
+            display: none;
+            background: rgba(255, 0, 0, 0.2);
+            border: 1px solid rgba(255, 0, 0, 0.5);
+            color: #ff6b6b;
+            padding: 15px;
+            border-radius: 10px;
+            text-align: center;
+            margin-top: 20px;
+        }
+        
+        .loading-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            border-radius: 12px;
+            transition: opacity 0.5s ease;
+        }
+        
+        .loading-overlay.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+        
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 4px solid rgba(255, 255, 255, 0.1);
+            border-top-color: #00d9ff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .loading-text {
+            margin-top: 15px;
+            color: #00d9ff;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📷 Live Camera Feed</h1>
+            <p class="subtitle">Raspberry Pi Camera Module 3 - Real-time Streaming with Autofocus</p>
+        </header>
+        
+        <div class="camera-container">
+            <div class="video-wrapper">
+                <div class="loading-overlay" id="loading">
+                    <div class="spinner"></div>
+                    <p class="loading-text">Connecting to camera...</p>
+                </div>
+                <img id="video-feed" src="/video_feed" alt="Camera Feed" onload="hideLoading()" onerror="showError()">
+            </div>
+            
+            <div class="status-bar">
+                <div class="status-indicator">
+                    <div class="status-dot"></div>
+                    <span class="status-text">LIVE</span>
+                </div>
+                <div class="camera-info">
+                    <div class="info-item">
+                        <span class="info-label">Resolution:</span>
+                        <span>{{ frame_width }}x{{ frame_height }}</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">FPS:</span>
+                        <span>30</span>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="error-message" id="error">
+                <p>⚠️ Failed to load camera feed</p>
+                <p style="font-size: 0.9rem; margin-top: 10px;">Please check camera connection and try refreshing the page.</p>
+            </div>
+            
+            <div class="controls">
+                <button class="btn btn-refresh" onclick="refreshFeed()">🔄 Refresh Feed</button>
+                <button class="btn btn-fullscreen" id="fullscreenBtn" onclick="toggleFullscreen()">⛶ Fullscreen</button>
+            </div>
+            <div class="fullscreen-controls">
+                <button class="btn btn-fullscreen" id="exitFullscreenBtn" onclick="toggleFullscreen()">✕ Exit Fullscreen</button>
+            </div>
+        </div>
+        
+        <div class="footer">
+            <p>Meat Quality Monitoring System - Camera Feed Server</p>
+        </div>
+    </div>
+    
+    <script>
+        function hideLoading() {
+            const loading = document.getElementById('loading');
+            loading.classList.add('hidden');
+        }
+        
+        function showError() {
+            const loading = document.getElementById('loading');
+            const error = document.getElementById('error');
+            loading.classList.add('hidden');
+            error.style.display = 'block';
+        }
+        
+        function refreshFeed() {
+            const video = document.getElementById('video-feed');
+            const loading = document.getElementById('loading');
+            const error = document.getElementById('error');
+            
+            // Reset states
+            error.style.display = 'none';
+            loading.classList.remove('hidden');
+            
+            // Reload video
+            const timestamp = new Date().getTime();
+            video.src = '/video_feed?' + timestamp;
+        }
+        
+        // Check camera status periodically
+        async function checkStatus() {
+            try {
+                const response = await fetch('/status');
+                const data = await response.json();
+                
+                if (data.status !== 'ok') {
+                    console.warn('Camera status issue:', data.message);
+                }
+            } catch (error) {
+                console.error('Failed to check camera status:', error);
+            }
+        }
+        
+        // Check status every 5 seconds
+        setInterval(checkStatus, 5000);
+        
+        // Fullscreen functionality
+        let isFullscreen = false;
+        
+        function toggleFullscreen() {
+            const body = document.body;
+            const fullscreenBtn = document.getElementById('fullscreenBtn');
+            const exitFullscreenBtn = document.getElementById('exitFullscreenBtn');
+            
+            if (!isFullscreen) {
+                // Enter fullscreen
+                body.classList.add('fullscreen-mode');
+                fullscreenBtn.classList.add('active');
+                fullscreenBtn.innerHTML = '✕ Exit Fullscreen';
+                
+                // Try to use browser's fullscreen API
+                if (document.documentElement.requestFullscreen) {
+                    document.documentElement.requestFullscreen().catch(err => {
+                        console.log('Fullscreen API not supported or denied:', err);
+                    });
+                } else if (document.documentElement.webkitRequestFullscreen) {
+                    document.documentElement.webkitRequestFullscreen();
+                } else if (document.documentElement.msRequestFullscreen) {
+                    document.documentElement.msRequestFullscreen();
+                }
+                
+                isFullscreen = true;
+            } else {
+                // Exit fullscreen
+                exitFullscreen();
+            }
+        }
+        
+        function exitFullscreen() {
+            const body = document.body;
+            const fullscreenBtn = document.getElementById('fullscreenBtn');
+            
+            body.classList.remove('fullscreen-mode');
+            fullscreenBtn.classList.remove('active');
+            fullscreenBtn.innerHTML = '⛶ Fullscreen';
+            
+            // Exit browser fullscreen
+            if (document.exitFullscreen) {
+                document.exitFullscreen().catch(err => {
+                    console.log('Exit fullscreen error:', err);
+                });
+            } else if (document.webkitExitFullscreen) {
+                document.webkitExitFullscreen();
+            } else if (document.msExitFullscreen) {
+                document.msExitFullscreen();
+            }
+            
+            isFullscreen = false;
+        }
+        
+        // Listen for fullscreen change events (ESC key, etc.)
+        document.addEventListener('fullscreenchange', handleFullscreenChange);
+        document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+        document.addEventListener('msfullscreenchange', handleFullscreenChange);
+        
+        function handleFullscreenChange() {
+            const isBrowserFullscreen = document.fullscreenElement ||
+                                       document.webkitFullscreenElement ||
+                                       document.msFullscreenElement;
+            
+            if (!isBrowserFullscreen && isFullscreen) {
+                exitFullscreen();
+            }
+        }
+        
+        // Listen for ESC key to exit fullscreen
+        document.addEventListener('keydown', function(event) {
+            if (event.key === 'Escape' && isFullscreen) {
+                exitFullscreen();
+            }
+        });
+    </script>
+</body>
+</html>
