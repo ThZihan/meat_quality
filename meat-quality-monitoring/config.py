@@ -1,20 +1,59 @@
 """
 Configuration file for Meat Quality Monitoring System
-Contains all configurable parameters for MQTT, database, and sensor thresholds
+Contains all configurable parameters for API, database, and sensor thresholds
 """
 
+import os
+
 # ============================================================================
-# MQTT Configuration
+# Environment Variables
+# ============================================================================
+
+# Load .env file if present (for local development)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    # python-dotenv not installed; rely on system env vars
+    pass
+
+# ============================================================================
+# Sensor API Configuration
+# ============================================================================
+
+# Remote API base URL (without endpoint path)
+SENSOR_API_BASE = os.environ.get(
+    "SENSOR_API_BASE",
+    "https://meat-monitor.kalobiral.com.bd/api/meat-data"
+)
+SENSOR_API_KEY = os.environ.get("SENSOR_API_KEY", "")
+SENSOR_API_TIMEOUT = int(os.environ.get("SENSOR_API_TIMEOUT", "10"))  # seconds
+
+# Polling & Recovery Settings
+SENSOR_API_POLL_INTERVAL = int(os.environ.get("SENSOR_API_POLL_INTERVAL", "5"))  # seconds between /current polls
+SENSOR_API_MAX_RETRIES = int(os.environ.get("SENSOR_API_MAX_RETRIES", "3"))  # retries per request
+SENSOR_API_RETRY_BASE_DELAY = int(os.environ.get("SENSOR_API_RETRY_BASE_DELAY", "2"))  # seconds (doubles each retry)
+SENSOR_API_HISTORY_LIMIT = int(os.environ.get("SENSOR_API_HISTORY_LIMIT", "5000"))  # max readings per /history call
+SENSOR_API_CATCHUP_FAILURE_THRESHOLD = int(os.environ.get("SENSOR_API_CATCHUP_FAILURE_THRESHOLD", "5"))  # consecutive failures before re-catch-up
+
+# Bookmark file — tracks last seen reading ID for recovery
+BOOKMARK_FILE = os.environ.get(
+    "BOOKMARK_FILE",
+    os.path.expanduser("~/.meat_monitor_bookmark.json")
+)
+
+# ============================================================================
+# MQTT Configuration (legacy - kept for reference)
 # ============================================================================
 
 # MQTT Broker Settings
-MQTT_BROKER = "localhost"  # Mosquitto runs on the same Raspberry Pi
-MQTT_PORT = 1883
+MQTT_BROKER = os.environ.get("MQTT_BROKER", "localhost")
+MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
 MQTT_TOPIC = "meat-quality/data"
 MQTT_STATUS_TOPIC = "meat-quality/status"
 MQTT_LWT_TOPIC = "meat-quality/lwt"
-MQTT_USERNAME = "meat_monitor"
-MQTT_PASSWORD = "meat_monitor"
+MQTT_USERNAME = os.environ.get("MQTT_USERNAME", "")
+MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD", "")
 
 # MQTT Connection Settings
 MQTT_KEEPALIVE = 60  # Keep-alive interval in seconds

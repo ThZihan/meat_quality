@@ -1,10 +1,13 @@
 """
 Multi-Modal Meat Quality Monitoring System Dashboard
 Streamlit application combining Computer Vision (Custom CNN) and Gas Sensors
-Supports both MQTT (real sensor data) and Mock (simulation) modes
+Supports both API (real sensor data) and Mock (simulation) modes
 """
 
 from typing import Optional
+from pathlib import Path
+import sqlite3
+import subprocess
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -20,7 +23,8 @@ from datetime import datetime
 
 # Import project modules
 import config
-from mqtt_client_simple import get_simple_mqtt_client as get_mqtt_client, map_quality_level, determine_gas_status
+from api_client import get_api_client
+from mqtt_client_simple import map_quality_level, determine_gas_status
 from db_manager import get_db_manager
 from mock_data import get_time_elapsed, get_fusion_decision, get_readings
 from camera import (
@@ -28,13 +32,22 @@ from camera import (
     list_available_cameras,
     check_module3_available,
 )
-from image_capture import ImageCapture
 from camera_config import (
     CameraCaptureConfig,
     AutofocusMode,
     AutofocusRange,
     AutofocusSpeed
 )
+from image_capture import ImageCapture
+
+
+CAPTURE_SERVICE_NAME = "pi-image-capture.service"
+SYSTEMCTL_BIN = "/usr/bin/systemctl"
+PYTHON_BIN = "/usr/bin/python3"
+SUDO_BIN = "/usr/bin/sudo"
+PENDING_SYNC_DIR = Path("/home/pi/pending_sync")
+SYNC_LEDGER_PATH = Path("/home/pi/sync_state.db")
+SYNC_SCRIPT_PATH = Path("/home/pi/meat-quality-monitoring/sync.py")
 
 
 
@@ -108,13 +121,155 @@ st.markdown("""
         border-radius: 15px;
         box-shadow: 0 4px 8px rgba(0,0,0,0.2);
     }
+    
+    /* Wider and more visible scrollbar */
+    ::-webkit-scrollbar {
+        width: 16px;
+        height: 16px;
+    }
+    ::-webkit-scrollbar-track {
+        background: #2d2d2d;
+        border-radius: 8px;
+    }
+    ::-webkit-scrollbar-thumb {
+        background: #6c757d;
+        border-radius: 8px;
+        border: 2px solid #2d2d2d;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+        background: #adb5bd;
+    }
+    ::-webkit-scrollbar-corner {
+        background: #2d2d2d;
+    }
+    
+    /* Firefox scrollbar */
+    * {
+        scrollbar-width: auto;
+        scrollbar-color: #6c757d #2d2d2d;
+    }
+    
+    /* Responsive tablet layout for 800x480 displays */
+    @media screen and (max-width: 820px), screen and (max-height: 520px) {
+        .stApp {
+            padding-top: 1.75rem;
+        }
+
+        .block-container {
+            padding-top: 0.65rem;
+            padding-bottom: 0.75rem;
+            padding-left: 0.8rem;
+            padding-right: 0.8rem;
+        }
+
+        section[data-testid="stSidebar"] {
+            min-width: 210px !important;
+            max-width: 210px !important;
+        }
+
+        section[data-testid="stSidebar"] .block-container {
+            padding-top: 0.75rem;
+            padding-left: 0.65rem;
+            padding-right: 0.65rem;
+        }
+
+        h1 {
+            font-size: 1.45rem !important;
+            line-height: 1.15 !important;
+            margin-bottom: 0.25rem !important;
+        }
+
+        h2 {
+            font-size: 1.05rem !important;
+            line-height: 1.15 !important;
+            margin-top: 0.3rem !important;
+            margin-bottom: 0.25rem !important;
+        }
+
+        h3 {
+            font-size: 0.95rem !important;
+            line-height: 1.1 !important;
+            margin-top: 0.2rem !important;
+            margin-bottom: 0.2rem !important;
+        }
+
+        p,
+        label,
+        .stMarkdown,
+        .stCaption {
+            font-size: 0.9rem !important;
+            line-height: 1.2 !important;
+        }
+
+        div[data-testid="stHorizontalBlock"] {
+            flex-wrap: wrap !important;
+            gap: 0.5rem !important;
+        }
+
+        div[data-testid="column"] {
+            width: 100% !important;
+            flex: 1 1 100% !important;
+            min-width: 100% !important;
+        }
+
+        div[data-testid="stMetric"] {
+            padding: 0.25rem 0 !important;
+        }
+
+        div[data-testid="stMetricLabel"] {
+            font-size: 0.8rem !important;
+        }
+
+        div[data-testid="stMetricValue"] {
+            font-size: 1.1rem !important;
+            line-height: 1.1 !important;
+        }
+
+        .status-safe,
+        .status-warning,
+        .status-spoiled,
+        .status-critical {
+            font-size: 1.35rem;
+            padding: 0.8rem;
+            border-width: 2px;
+            line-height: 1.15;
+        }
+
+        .metric-card,
+        .fusion-card {
+            padding: 0.75rem;
+        }
+
+        div[data-testid="stFileUploaderDropzone"] {
+            padding: 0.6rem !important;
+        }
+
+        div[data-testid="stButton"] > button,
+        div[data-testid="stDownloadButton"] > button {
+            width: 100%;
+            min-height: 2.2rem;
+            padding: 0.35rem 0.6rem;
+            font-size: 0.88rem;
+        }
+
+        div[data-testid="stImage"] img {
+            max-height: 220px !important;
+            object-fit: contain;
+        }
+
+        div[data-testid="stPlotlyChart"] .js-plotly-plot,
+        div[data-testid="stPlotlyChart"] .plot-container,
+        div[data-testid="stPlotlyChart"] .svg-container {
+            height: 220px !important;
+        }
+    }
 </style>
 """, unsafe_allow_html=True)
 
 
 # Initialize session state
 if 'data_mode' not in st.session_state:
-    st.session_state.data_mode = 'mock'  # 'mqtt' or 'mock'
+    st.session_state.data_mode = 'api'  # 'api' or 'mock'
 
 if 'simulation_running' not in st.session_state:
     st.session_state.simulation_running = False
@@ -136,16 +291,15 @@ if 'uploaded_image_bytes' not in st.session_state:
 if 'visual_prediction' not in st.session_state:
     st.session_state.visual_prediction = None
 
+if 'capture_service_feedback' not in st.session_state:
+    st.session_state.capture_service_feedback = None
 
-if 'mqtt_connected' not in st.session_state:
-    st.session_state.mqtt_connected = False
+if 'capture_service_feedback_level' not in st.session_state:
+    st.session_state.capture_service_feedback_level = 'info'
 
-if 'mqtt_started' not in st.session_state:
-    st.session_state.mqtt_started = False
 
-# Initialize MQTT client in session state
-if '_mqtt_client' not in st.session_state:
-    st.session_state._mqtt_client = None
+if 'api_connected' not in st.session_state:
+    st.session_state.api_connected = False
 
 if 'last_db_check' not in st.session_state:
     st.session_state.last_db_check = 0
@@ -159,9 +313,9 @@ with st.sidebar:
     st.subheader("📡 Data Source")
     data_mode = st.radio(
         "Select Data Mode",
-        options=['mqtt', 'mock'],
-        format_func=lambda x: "MQTT (Real Sensors)" if x == 'mqtt' else "Mock (Simulation)",
-        index=0 if st.session_state.data_mode == 'mqtt' else 1
+        options=['api', 'mock'],
+        format_func=lambda x: "API (Real Sensors)" if x == 'api' else "Mock (Simulation)",
+        index=0 if st.session_state.data_mode == 'api' else 1
     )
     
     if data_mode != st.session_state.data_mode:
@@ -171,24 +325,35 @@ with st.sidebar:
         ])
         st.rerun()
     
-    # MQTT Connection Status
-    if st.session_state.data_mode == 'mqtt':
-        mqtt_client = get_mqtt_client(st.session_state)
+    # API Connection Status & Background Service Info
+    if st.session_state.data_mode == 'api':
+        api_client = get_api_client()
         
-        # Poll for MQTT messages (simplified client uses polling)
-        mqtt_client.poll(timeout=0.5)
-        
-        # Check if data is being received (within 10 seconds)
-        st.session_state.mqtt_connected = mqtt_client.is_data_receiving(timeout_seconds=10.0)
-        
-        if st.session_state.mqtt_connected:
-            st.success("✅ MQTT Connected")
+        # Show background service bookmark info
+        bookmark = api_client.get_bookmark_info()
+        if bookmark.get("last_id", 0) > 0:
+            st.success("✅ Sensor Data Active")
+            st.caption(f"Last reading ID: {bookmark['last_id']}")
         else:
-            st.warning("⚠️ MQTT Disconnected")
-            if st.button("🔄 Reconnect MQTT"):
-                if mqtt_client.connect():
-                    st.success("Reconnected!")
-                    st.rerun()
+            st.warning("⚠️ No data yet")
+            st.caption("Start the background client to fetch data.")
+        
+        # Test connection button
+        if st.button("🔄 Test API Connection"):
+            reading = api_client.fetch_current()
+            if reading is not None:
+                st.session_state.api_connected = True
+                st.success("Connection successful!")
+                st.json({
+                    "temperature": reading.get("temperature"),
+                    "humidity": reading.get("humidity"),
+                    "h2s_ppm": reading.get("h2s_ppm"),
+                    "nh3_ppm": reading.get("nh3_ppm"),
+                    "co2_ppm": reading.get("co2_ppm"),
+                    "quality": reading.get("quality"),
+                })
+            else:
+                st.error(f"Connection failed: {api_client.last_error}")
     
     st.divider()
     
@@ -220,7 +385,7 @@ with st.sidebar:
             step=5
         )
     else:
-        room_temp = 25  # Default for MQTT mode
+        room_temp = 25  # Default for API mode
         humidity = 60
     
     st.divider()
@@ -244,7 +409,7 @@ with st.sidebar:
         elapsed_time = get_time_elapsed()
         st.metric("⏱️ Time Elapsed", f"{elapsed_time:.1f} s")
     else:
-        # Show database stats for MQTT mode
+        # Show database stats for API mode
         db = get_db_manager()
         reading_count = db.get_reading_count()
         st.metric("📊 Total Readings", f"{reading_count}")
@@ -303,8 +468,8 @@ with st.sidebar:
                 width='stretch'
             )
             
-            # Delete all data button (only for MQTT mode)
-            if st.session_state.data_mode == 'mqtt':
+            # Delete all data button (only for API mode)
+            if st.session_state.data_mode == 'api':
                 if st.button("🗑️ Delete All Data", type="secondary"):
                     db = get_db_manager()
                     result = db.delete_all_data()
@@ -356,7 +521,148 @@ def get_color(value, warning_threshold, critical_threshold):
         return "#FF0000"  # Red
 
 
-# Update data (Mock or MQTT)
+def format_bytes(size_bytes: int) -> str:
+    """Format bytes into a human-readable value."""
+    value = float(size_bytes)
+    units = ["B", "KB", "MB", "GB", "TB"]
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{size_bytes} B"
+
+
+def run_privileged_command(command: list[str]) -> tuple[bool, str]:
+    """Run a command, preferring sudo for system service control."""
+    full_command = command
+    if Path(SUDO_BIN).exists():
+        full_command = [SUDO_BIN, *command]
+
+    try:
+        result = subprocess.run(
+            full_command,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except Exception as error:
+        return False, str(error)
+
+    output = (result.stdout or result.stderr or "Command completed.").strip()
+    return result.returncode == 0, output
+
+
+def get_capture_service_status() -> dict:
+    """Return the current systemd state for the continuous capture service."""
+    active_ok, active_output = run_privileged_command([SYSTEMCTL_BIN, "is-active", CAPTURE_SERVICE_NAME])
+    enabled_ok, enabled_output = run_privileged_command([SYSTEMCTL_BIN, "is-enabled", CAPTURE_SERVICE_NAME])
+
+    active_state = active_output.strip().splitlines()[-1] if active_output else "unknown"
+    enabled_state = enabled_output.strip().splitlines()[-1] if enabled_output else "unknown"
+
+    return {
+        'is_active': active_ok and active_state == 'active',
+        'active_state': active_state,
+        'is_enabled': enabled_ok and enabled_state == 'enabled',
+        'enabled_state': enabled_state,
+    }
+
+
+def control_capture_service(action: str) -> tuple[bool, str]:
+    """Start or stop the background capture service from the dashboard."""
+    if action == 'start':
+        return run_privileged_command([SYSTEMCTL_BIN, 'enable', '--now', CAPTURE_SERVICE_NAME])
+    if action == 'stop':
+        return run_privileged_command([SYSTEMCTL_BIN, 'stop', CAPTURE_SERVICE_NAME])
+    return False, f"Unsupported action: {action}"
+
+
+def run_sync_now() -> tuple[bool, str]:
+    """Trigger a foreground sync run from the dashboard."""
+    return run_privileged_command([PYTHON_BIN, str(SYNC_SCRIPT_PATH)])
+
+
+def get_sync_state_summary() -> dict:
+    """Collect pending directory and SQLite ledger status for the UI."""
+    pending_files = []
+    if PENDING_SYNC_DIR.exists():
+        pending_files = sorted(
+            [file_path for file_path in PENDING_SYNC_DIR.iterdir() if file_path.is_file()],
+            key=lambda file_path: file_path.stat().st_mtime,
+            reverse=True,
+        )
+
+    pending_bytes = sum(file_path.stat().st_size for file_path in pending_files)
+    status_counts = {}
+    latest_row = None
+
+    if SYNC_LEDGER_PATH.exists():
+        try:
+            with sqlite3.connect(SYNC_LEDGER_PATH) as connection:
+                cursor = connection.cursor()
+                for status, count in cursor.execute(
+                    "SELECT status, COUNT(*) FROM images GROUP BY status ORDER BY status"
+                ).fetchall():
+                    status_counts[status] = count
+
+                latest_row = cursor.execute(
+                    """
+                    SELECT filename, capture_time, upload_time, status
+                    FROM images
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+        except sqlite3.Error:
+            latest_row = None
+
+    return {
+        'pending_files': len(pending_files),
+        'pending_bytes': pending_bytes,
+        'latest_pending_path': pending_files[0] if pending_files else None,
+        'status_counts': status_counts,
+        'latest_row': latest_row,
+    }
+
+
+def load_latest_pending_capture() -> tuple[bool, str]:
+    """Load the most recent pending image into the dashboard preview pane."""
+    summary = get_sync_state_summary()
+    latest_pending_path = summary['latest_pending_path']
+    if latest_pending_path is None:
+        return False, f"No image is waiting in {PENDING_SYNC_DIR}."
+
+    try:
+        st.session_state.uploaded_image_bytes = latest_pending_path.read_bytes()
+        st.session_state.uploaded_image = None
+        st.session_state.visual_prediction = None
+        return True, f"Loaded latest pending capture: {latest_pending_path.name}"
+    except OSError as error:
+        return False, f"Failed to load latest pending capture: {error}"
+
+
+def capture_dashboard_image() -> tuple[bool, str]:
+    """Capture a fresh dashboard image through the LED-assisted high-res path."""
+    try:
+        capturer = ImageCapture()
+        result = capturer.capture_with_led_assistance(
+            timeout=20,
+            custom_prefix="dashboard_capture",
+        )
+
+        if not result['success']:
+            return False, result.get('error') or result.get('message') or 'Capture failed.'
+
+        st.session_state.uploaded_image_bytes = result['image_bytes']
+        st.session_state.uploaded_image = None
+        st.session_state.visual_prediction = None
+        return True, f"Captured image: {result['filename']}"
+    except Exception as error:
+        return False, f"Capture failed: {error}"
+
+
+# Update data (Mock or API)
 if st.session_state.data_mode == 'mock' and st.session_state.simulation_running:
     current_time = time.time()
     
@@ -384,8 +690,8 @@ if st.session_state.data_mode == 'mock' and st.session_state.simulation_running:
         st.session_state.last_update = current_time
         st.rerun()
 
-elif st.session_state.data_mode == 'mqtt':
-    # Load data from database
+elif st.session_state.data_mode == 'api':
+    # Load data from local database (background service handles API fetching)
     current_time = time.time()
     
     if current_time - st.session_state.last_db_check >= config.CHART_REFRESH_INTERVAL:
@@ -409,7 +715,6 @@ elif st.session_state.data_mode == 'mqtt':
             st.session_state.history = pd.DataFrame(df_data)
         
         st.session_state.last_db_check = current_time
-        # Removed redundant st.rerun() - already handled at end of script
 
 
 # Get current readings
@@ -424,6 +729,13 @@ else:
         'humidity': 0.0,
         'quality_level': 'UNKNOWN'
     }
+
+
+capture_service_status = None
+sync_state_summary = None
+if st.session_state.data_mode == 'api':
+    capture_service_status = get_capture_service_status()
+    sync_state_summary = get_sync_state_summary()
 
 
 # Main Content Area - Split into two columns
@@ -448,13 +760,10 @@ with left_col:
         # Reset file pointer
         uploaded_file.seek(0)
     
-    # Mock camera button
-    col_btn1, col_btn2 = st.columns(2)
-    with col_btn1:
-        if st.button("📷 Capture Camera"):
-            # Capture image from real camera or use dummy image for mock mode
-            if st.session_state.data_mode == 'mock':
-                # Use dummy image for mock mode
+    if st.session_state.data_mode == 'mock':
+        col_btn1, col_btn2 = st.columns(2)
+        with col_btn1:
+            if st.button("📷 Load Dummy Capture"):
                 try:
                     with open("images/dummyImg.png", "rb") as f:
                         st.session_state.uploaded_image_bytes = f.read()
@@ -462,37 +771,108 @@ with left_col:
                     st.success("Dummy image loaded for simulation!")
                 except FileNotFoundError:
                     st.error("Dummy image not found. Please ensure images/dummyImg.png exists.")
-            else:
-                # Capture from real camera for MQTT mode
-                with st.spinner("Capturing from camera..."):
-                    # Use Camera Module 3 if available, otherwise try V4L2
-                    use_module3 = check_module3_available()
-                    
-                    # Configure Camera Module 3 with autofocus for meat quality monitoring
-                    # Using full resolution (4608x2592), low ISO (100), and highest quality PNG format
-                    module3_config = CameraCaptureConfig(
-                        width=4608,
-                        height=2592,
-                        format='png',
-                        iso=100,  # Low ISO for best quality
-                        autofocus_mode=AutofocusMode.CONTINUOUS,
-                        autofocus_range=AutofocusRange.NORMAL,
-                        autofocus_speed=AutofocusSpeed.NORMAL
-                    )
-                    
-                    # Use ImageCapture module to capture and save image
-                    capturer = ImageCapture()
-                    capture_result = capturer.capture_from_feed_server()
-                    
-                    if capture_result['success']:
-                        # Store captured image in session state for display
-                        st.session_state.uploaded_image_bytes = capture_result['image_bytes']
-                        st.session_state.uploaded_image = None
-                        st.success(f"Image captured and saved as {capture_result['filename']}!")
-                    else:
-                        st.error(f"Failed to capture image: {capture_result['message']}")
-    
-    with col_btn2:
+
+        with col_btn2:
+            if st.button("🔄 Clear Image"):
+                st.session_state.uploaded_image = None
+                st.session_state.uploaded_image_bytes = None
+                st.session_state.visual_prediction = None
+    else:
+        st.markdown("### 🎛️ Edge Capture Controls")
+
+        if st.session_state.capture_service_feedback:
+            feedback_writer = getattr(st, st.session_state.capture_service_feedback_level, st.info)
+            feedback_writer(st.session_state.capture_service_feedback)
+
+        if capture_service_status and capture_service_status['is_active']:
+            st.success("Continuous capture service is running. Images are being captured every 30 seconds.")
+        else:
+            active_state = capture_service_status['active_state'] if capture_service_status else 'unknown'
+            st.warning(f"Continuous capture service is not running right now. Current state: {active_state}")
+
+        metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+        with metric_col1:
+            st.metric("Service", "Running" if capture_service_status and capture_service_status['is_active'] else "Stopped")
+        with metric_col2:
+            st.metric("Pending Files", sync_state_summary['pending_files'] if sync_state_summary else 0)
+        with metric_col3:
+            st.metric("Pending Pool", format_bytes(sync_state_summary['pending_bytes']) if sync_state_summary else "0 B")
+        with metric_col4:
+            uploaded_count = sync_state_summary['status_counts'].get('uploaded', 0) if sync_state_summary else 0
+            st.metric("Uploaded", uploaded_count)
+
+        latest_row = sync_state_summary['latest_row'] if sync_state_summary else None
+        if latest_row:
+            st.caption(
+                f"Latest ledger row: {latest_row[0]} | captured at {latest_row[1]} | "
+                f"status: {latest_row[3]}"
+            )
+
+        st.info(
+            f"Images are stored first in {PENDING_SYNC_DIR}. They stay there until "
+            f"[sync.py](meat-quality-monitoring/sync.py:1) uploads them successfully and removes the local file."
+        )
+
+        control_col1, control_col2, control_col3 = st.columns(3)
+        with control_col1:
+            if st.button("▶️ Start Capturing", disabled=capture_service_status and capture_service_status['is_active']):
+                success, message = control_capture_service('start')
+                if success:
+                    st.session_state.capture_service_feedback = "Continuous edge capture started. Uploading will resume automatically after 10 MB is pooled."
+                    st.session_state.capture_service_feedback_level = 'success'
+                else:
+                    st.session_state.capture_service_feedback = f"Failed to start capture service: {message}"
+                    st.session_state.capture_service_feedback_level = 'error'
+                st.rerun()
+
+        with control_col2:
+            if st.button("⏹️ Stop Capturing", disabled=not (capture_service_status and capture_service_status['is_active'])):
+                success, message = control_capture_service('stop')
+                if success:
+                    st.session_state.capture_service_feedback = "Continuous edge capture stopped. Pending files remain on disk until capture is started again or sync is run manually."
+                    st.session_state.capture_service_feedback_level = 'warning'
+                else:
+                    st.session_state.capture_service_feedback = f"Failed to stop capture service: {message}"
+                    st.session_state.capture_service_feedback_level = 'error'
+                st.rerun()
+
+        with control_col3:
+            if st.button("🖼️ Load Latest Capture"):
+                success, message = load_latest_pending_capture()
+                if success:
+                    st.session_state.capture_service_feedback = message
+                    st.session_state.capture_service_feedback_level = 'success'
+                else:
+                    st.session_state.capture_service_feedback = message
+                    st.session_state.capture_service_feedback_level = 'warning'
+                st.rerun()
+
+        action_col1, action_col2 = st.columns(2)
+
+        with action_col1:
+            if st.button("📸 Capture Now"):
+                with st.spinner("Capturing image with automatic LED illumination..."):
+                    success, message = capture_dashboard_image()
+
+                if success:
+                    st.session_state.capture_service_feedback = f"Manual capture completed: {message}"
+                    st.session_state.capture_service_feedback_level = 'success'
+                else:
+                    st.session_state.capture_service_feedback = f"Manual capture failed: {message}"
+                    st.session_state.capture_service_feedback_level = 'error'
+                st.rerun()
+
+        with action_col2:
+            if st.button("☁️ Run Sync Now"):
+                success, message = run_sync_now()
+                if success:
+                    st.session_state.capture_service_feedback = f"Manual sync completed: {message}"
+                    st.session_state.capture_service_feedback_level = 'success'
+                else:
+                    st.session_state.capture_service_feedback = f"Manual sync stopped or failed: {message}"
+                    st.session_state.capture_service_feedback_level = 'warning'
+                st.rerun()
+
         if st.button("🔄 Clear Image"):
             st.session_state.uploaded_image = None
             st.session_state.uploaded_image_bytes = None
@@ -504,8 +884,19 @@ with left_col:
     if st.session_state.uploaded_image_bytes is not None:
         # Display image from session state (persists across reruns)
         st.image(st.session_state.uploaded_image_bytes, width='stretch', caption="Captured from Camera")
+    elif st.session_state.data_mode == 'api' and sync_state_summary and sync_state_summary['latest_pending_path']:
+        st.image(
+            str(sync_state_summary['latest_pending_path']),
+            width='stretch',
+            caption=f"Latest pending capture: {sync_state_summary['latest_pending_path'].name}"
+        )
     else:
-        st.info("Upload an image or use Capture Camera to start visual analysis.")
+        if st.session_state.data_mode == 'api':
+            st.info(
+                "Use Start Capturing to run the background service, or Load Latest Capture to preview the newest image waiting in /home/pi/pending_sync."
+            )
+        else:
+            st.info("Upload an image or load a dummy capture to start visual analysis.")
     
     # CNN Prediction
     st.markdown("### CNN Prediction Results")
@@ -522,7 +913,7 @@ with left_col:
                 st.session_state.visual_prediction = prediction
                 st.info("Showing dummy prediction for simulation mode.")
             else:
-                # Use actual CNN prediction for MQTT mode
+                # Use actual CNN prediction for API mode
                 prediction = predict_image()
                 st.session_state.visual_prediction = prediction
     
@@ -686,8 +1077,8 @@ gas_readings = {
 # Get fusion decision from mock_data module
 fusion_status, fusion_color = get_fusion_decision(visual_status, gas_readings)
 
-# If using MQTT data, also consider the ESP quality level
-if st.session_state.data_mode == 'mqtt' and current.get('quality_level') != 'UNKNOWN':
+# If using API data, also consider the ESP quality level
+if st.session_state.data_mode == 'api' and current.get('quality_level') != 'UNKNOWN':
     esp_quality = map_quality_level(current['quality_level'])
     # Use the more conservative status
     if esp_quality == "CRITICAL" or fusion_status == "CRITICAL":
@@ -822,7 +1213,7 @@ st.markdown(f"""
 <div style='text-align: center; color: #666;'>
     <p>🥩 Multi-Modal Meat Quality Monitoring System | Computer Vision + Gas Sensors</p>
     <p>Sensors: MQ136 (H2S), MQ137 (NH3), MQ135 (VOC), AHT10 (Temp/Humidity)</p>
-    <p>Data Mode: <strong>{'MQTT (Real Sensors)' if st.session_state.data_mode == 'mqtt' else 'Mock (Simulation)'}</strong></p>
+    <p>Data Mode: <strong>{'API (Real Sensors)' if st.session_state.data_mode == 'api' else 'Mock (Simulation)'}</strong></p>
     <p style='margin-top: 20px;'>
         © 2025 Tahfizul Hasan Zihan. All Rights Reserved.<br/>
         <a href='https://github.com/ThZihan/meat_quality/tree/master' target='_blank' style='color: #666; text-decoration: none;'>
@@ -837,6 +1228,6 @@ st.markdown(f"""
 if st.session_state.data_mode == 'mock' and st.session_state.simulation_running:
     time.sleep(config.CHART_REFRESH_INTERVAL)
     st.rerun()
-elif st.session_state.data_mode == 'mqtt' and config.AUTO_REFRESH_ENABLED:
+elif st.session_state.data_mode == 'api' and config.AUTO_REFRESH_ENABLED:
     time.sleep(config.CHART_REFRESH_INTERVAL)
     st.rerun()

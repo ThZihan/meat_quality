@@ -251,6 +251,28 @@ class ImageCapture:
             result['error'] = error_msg
             result['message'] = error_msg
             return result
+
+    def capture_with_led_assistance(
+        self,
+        timeout: int = 20,
+        custom_prefix: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Capture a final high-quality image using the server-side LED workflow.
+
+        The target endpoint enforces the sequence:
+        preliminary dummy capture -> light evaluation -> PWM LED set ->
+        optional settle -> final high-quality capture -> LED off.
+        """
+        original_capture_url = self.capture_url
+        try:
+            self.capture_url = self.DEFAULT_CAPTURE_URL
+            return self.capture_from_feed_server(
+                timeout=timeout,
+                custom_prefix=custom_prefix
+            )
+        finally:
+            self.capture_url = original_capture_url
     
     def save_image_bytes(
         self,
@@ -367,6 +389,15 @@ def capture_bytes_only(timeout: int = 10) -> Dict[str, Any]:
     """
     capturer = ImageCapture()
     return capturer.capture_and_return_bytes(timeout=timeout)
+
+
+def capture_and_save_with_led_assistance(
+    custom_prefix: Optional[str] = None,
+    timeout: int = 20
+) -> Dict[str, Any]:
+    """Convenience function for the dashboard LED-assisted capture path."""
+    capturer = ImageCapture()
+    return capturer.capture_with_led_assistance(timeout=timeout, custom_prefix=custom_prefix)
 
 
 if __name__ == "__main__":

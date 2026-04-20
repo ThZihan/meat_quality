@@ -180,7 +180,8 @@ class CameraFeedConfig:
             "--framerate", str(self.frame_rate),
             "--codec", "mjpeg",
             "--quality", str(self.jpeg_quality),
-            "--timeout", "0"  # No timeout
+            "--timeout", "0",  # No timeout
+            "--nopreview"  # Disable preview window to prevent camera conflict
         ]
         
         # Add autofocus options for Camera Module 3
@@ -308,6 +309,52 @@ class CameraCaptureConfig:
             args.extend(["--autofocus-trigger", self.autofocus_trigger])
         
         return args
+
+
+# ---------------------------------------------------------------------------
+# LED / Light-Detection Configuration
+# ---------------------------------------------------------------------------
+
+# GPIO pin connected to the LED driver (BCM numbering).
+LED_GPIO_PIN: int = int(os.getenv('LED_GPIO_PIN', 18))
+
+# PWM frequency in Hz.
+LED_PWM_FREQUENCY: int = int(os.getenv('LED_PWM_FREQUENCY', 1000))
+
+# Brightness thresholds (0-255 scale, mean of grayscale frame).
+#
+# Normal ambient light reads around 130.  The LED should begin ramping up
+# when brightness drops below 115 and be completely off at 120 and above.
+# A small hysteresis band (115-120) prevents flicker at the transition
+# boundary.
+LED_DARK_THRESHOLD: float = float(os.getenv('LED_DARK_THRESHOLD', 115.0))
+LED_BRIGHT_THRESHOLD: float = float(os.getenv('LED_BRIGHT_THRESHOLD', 120.0))
+
+# PWM duty-cycle limits.
+#
+# Keep a visible minimum floor once the darkness threshold is crossed so the
+# live-feed response is perceptible on hardware that barely glows at very low
+# PWM duty cycles.
+LED_MIN_PWM: float = float(os.getenv('LED_MIN_PWM', 0.35))
+LED_MAX_PWM: float = float(os.getenv('LED_MAX_PWM', 1.0))
+
+# Anti-flicker throttling.
+LED_THROTTLE_INTERVAL: float = float(os.getenv('LED_THROTTLE_INTERVAL', 0.5))
+LED_PWM_STEP: float = float(os.getenv('LED_PWM_STEP', 0.05))
+
+# How often (seconds) the live-feed monitor analyses a frame for brightness.
+LED_MONITOR_INTERVAL: float = float(os.getenv('LED_MONITOR_INTERVAL', 1.0))
+LED_ANALYSIS_INTERVAL: float = float(os.getenv('LED_ANALYSIS_INTERVAL', LED_MONITOR_INTERVAL))
+
+# Preliminary low-cost capture sizing for light analysis before the final shot.
+LED_DUMMY_CAPTURE_WIDTH: int = int(os.getenv('LED_DUMMY_CAPTURE_WIDTH', 640))
+LED_DUMMY_CAPTURE_HEIGHT: int = int(os.getenv('LED_DUMMY_CAPTURE_HEIGHT', 480))
+LED_DUMMY_CAPTURE_QUALITY: int = int(os.getenv('LED_DUMMY_CAPTURE_QUALITY', 80))
+LED_DUMMY_CAPTURE_TIMEOUT_MS: int = int(os.getenv('LED_DUMMY_CAPTURE_TIMEOUT_MS', 900))
+
+# Seconds to wait after setting PWM before the final high-res capture
+# so the LED illumination can stabilise.
+LED_SETTLE_TIME: float = float(os.getenv('LED_SETTLE_TIME', 0.3))
 
 
 # Default configurations

@@ -35,3 +35,31 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+# Environment / Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa
+secrets.json
+docker-compose.override.yml
+
+# Logs
+*.log
+mqtt_subscriber_output.log
+streamlit_dashboard.log
+camera_feed.log
+camera_feed.log.*.bak
+
+# Data & temp directories
+data/
+tmp/
+*.db
+*.db-journal
+*.sqlite
+
+# Captured images (large binary files)
+images/capture_*.jpg
+images/rpicam_test_*.jpg

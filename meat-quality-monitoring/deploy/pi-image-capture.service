@@ -1,0 +1,16 @@
+[Unit]
+Description=Continuous Raspberry Pi image capture
+After=local-fs.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/meat-quality-monitoring
+ExecStartPre=/bin/mkdir -p /home/pi/pending_sync
+ExecStart=/usr/bin/python3 /home/pi/meat-quality-monitoring/capture.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

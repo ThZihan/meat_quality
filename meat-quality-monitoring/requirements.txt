@@ -18,8 +18,14 @@ matplotlib>=3.7.0
 # Additional utilities
 altair>=5.0.0
 
-# MQTT Client for ESP32 communication
+# HTTP client for upload and camera integrations
+requests>=2.31.0
+
+# MQTT Client for ESP32 communication (legacy)
 paho-mqtt>=1.6.1
+
+# Environment variable loading
+python-dotenv>=1.0.0
 
 # Image processing
 Pillow>=10.0.0
