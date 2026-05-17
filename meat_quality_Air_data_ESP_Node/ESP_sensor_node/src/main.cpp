@@ -46,12 +46,16 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <Wire.h>
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <time.h>
+#include <sys/time.h>
 #include <EEPROM.h>
+#include <Adafruit_AHTX0.h>
+#include "sntp.h"
 
 // ═══════════════════════════════════════════════════════════════
 // CONFIGURATION
@@ -59,12 +63,12 @@
 
 // HTTP API
 const char* API_URL   = "https://meat-monitor.kalobiral.com.bd/api/meat-data";
-const char* API_KEY   = "YOUR_API_KEY_HERE";  // Set before flashing
+const char* API_KEY   = "aa8a531a309e574c7fef976850416e7613984ba03f4cf370";  // Set before flashing
 const char* DEVICE_ID = "ESP32-MeatMonitor";
 
 // SoftAP Config Portal
 const char* AP_SSID     = "ESP32-Setup";
-const char* AP_PASSWORD = "YOUR_AP_PASSWORD_HERE";  // Set before flashing
+const char* AP_PASSWORD = "12345678";  // Set before flashing
 
 // Timing
 const unsigned long READ_INTERVAL_MS = 3000;  // 3 seconds
@@ -83,12 +87,22 @@ const int JSON_BUF_SIZE   = 512;
 #define EEPROM_MAX_LEN     64
 
 // Hardware
-const int MQ135_PIN = 34;  // ADC1_CH6
-const int MQ136_PIN = 35;  // ADC1_CH7
+const int MQ135_PIN = 35;  // ADC1_CH6
+const int MQ136_PIN = 34;  // ADC1_CH7
 const int MQ137_PIN = 32;  // ADC1_CH4
+const int AHT10_SDA_PIN = 21;
+const int AHT10_SCL_PIN = 22;
+const uint8_t AHT10_ADDRESS = 0x38;
 const float VOLTAGE_DIVIDER_RATIO = 1.5222;  // 4.7k upper, 9k lower
 const float ESP32_VREF = 3.3;
 const int ADC_RESOLUTION = 4095;
+const unsigned long AHT10_RETRY_MS = 5000;
+const unsigned long NTP_SYNC_TIMEOUT_MS = 10000;
+const unsigned long NTP_RETRY_INTERVAL_MS = 10UL * 60UL * 1000UL;
+const time_t PRESET_TIME_UTC = 1778652000;  // 2026-05-13T12:00:00Z — updated fallback if NTP fails
+
+// Time sync control flag - set to true to use NTP, false to use hardcoded time
+const bool ENABLE_TIME_SYNC = true;
 
 // MQ Sensor Parameters
 const float RL = 10000.0;  // 10kΩ load resistor
@@ -149,6 +163,187 @@ unsigned long lastReadTime = 0;
 WebServer* portalServer = nullptr;
 DNSServer* dnsServer    = nullptr;
 bool portalActive       = false;
+
+// AHT10 temperature/humidity sensor
+Adafruit_AHTX0 aht10;
+bool aht10Ready = false;
+unsigned long lastAht10InitAttempt = 0;
+
+// Time synchronization / fallback clock
+volatile bool ntpTimeSynced = false;
+volatile bool ntpSyncInProgress = false;
+volatile bool ntpSyncEventPending = false;
+volatile bool usingFallbackTime = false;
+bool fallbackTimeApplied = false;
+unsigned long ntpSyncStartMs = 0;
+unsigned long lastNtpAttemptMs = 0;
+unsigned long lastTimeWaitLogMs = 0;
+
+// ═══════════════════════════════════════════════════════════════
+// AHT10 TEMPERATURE/HUMIDITY SENSOR
+// ═══════════════════════════════════════════════════════════════
+
+bool isI2CDevicePresent(uint8_t address) {
+    Wire.beginTransmission(address);
+    return Wire.endTransmission() == 0;
+}
+
+bool initAHT10() {
+    lastAht10InitAttempt = millis();
+    Serial.println(F("[AHT10] Initializing sensor..."));
+
+    if (!isI2CDevicePresent(AHT10_ADDRESS)) {
+        Serial.println(F("[AHT10] Sensor not found at I2C address 0x38"));
+        aht10Ready = false;
+        return false;
+    }
+
+    if (!aht10.begin(&Wire)) {
+        Serial.println(F("[AHT10] Sensor detected on I2C, but initialization failed"));
+        aht10Ready = false;
+        return false;
+    }
+
+    aht10Ready = true;
+    Serial.println(F("[AHT10] ✓ Sensor initialized successfully"));
+    return true;
+}
+
+bool readAHT10(float& temperatureC, float& humidityRH) {
+    if (!aht10Ready) {
+        return false;
+    }
+
+    sensors_event_t humidityEvent;
+    sensors_event_t temperatureEvent;
+    aht10.getEvent(&humidityEvent, &temperatureEvent);
+
+    temperatureC = temperatureEvent.temperature;
+    humidityRH = humidityEvent.relative_humidity;
+
+    if (isnan(temperatureC) || isnan(humidityRH)) {
+        Serial.println(F("[AHT10] Invalid reading (NaN). Marking sensor unavailable."));
+        aht10Ready = false;
+        return false;
+    }
+
+    // Range validation: AHT10 spec is -40°C to 85°C, 0-100% RH
+    // Garbage I2C data can produce valid floats that are physically impossible
+    if (temperatureC < -40.0 || temperatureC > 85.0 ||
+        humidityRH < 0.0 || humidityRH > 100.0) {
+        Serial.printf("[AHT10] Out-of-range reading: Temp=%.2f°C Hum=%.2f%%RH — discarding\n",
+                      temperatureC, humidityRH);
+        return false;  // Don't mark sensor unavailable; could be transient glitch
+    }
+
+    return true;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// TIME SYNCHRONIZATION / FALLBACK CLOCK
+// ═══════════════════════════════════════════════════════════════
+
+void formatUtcTimestamp(time_t epoch, char* buf, size_t bufSize) {
+    struct tm timeinfo;
+    gmtime_r(&epoch, &timeinfo);
+    strftime(buf, bufSize, "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
+}
+
+bool getCurrentTimestamp(char* buf, size_t bufSize) {
+    if (!ntpTimeSynced && !fallbackTimeApplied) {
+        return false;
+    }
+
+    time_t now = time(nullptr);
+    if (now <= 0) {
+        return false;
+    }
+
+    formatUtcTimestamp(now, buf, bufSize);
+    return true;
+}
+
+void onNtpTimeSync(struct timeval* tv) {
+    (void)tv;
+    ntpTimeSynced = true;
+    ntpSyncInProgress = false;
+    usingFallbackTime = false;
+    ntpSyncEventPending = true;
+}
+
+void applyPresetTimeFallback() {
+    if (fallbackTimeApplied) {
+        usingFallbackTime = true;
+        return;
+    }
+
+    struct timeval tv = {};
+    tv.tv_sec = PRESET_TIME_UTC;
+    settimeofday(&tv, nullptr);
+
+    fallbackTimeApplied = true;
+    usingFallbackTime = true;
+
+    char timestamp[32];
+    formatUtcTimestamp(PRESET_TIME_UTC, timestamp, sizeof(timestamp));
+    Serial.printf("[NTP] Using preset fallback time: %s\n", timestamp);
+}
+
+void startNtpSync(const char* reason) {
+    if (!ENABLE_TIME_SYNC) {
+        Serial.println("[NTP] Time sync disabled by flag. Using hardcoded time.");
+        applyPresetTimeFallback();
+        return;
+    }
+
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.printf("[NTP] Skipping sync (%s) — WiFi not connected\n", reason);
+        return;
+    }
+
+    sntp_set_time_sync_notification_cb(onNtpTimeSync);
+    ntpSyncInProgress = true;
+    ntpSyncEventPending = false;
+    ntpSyncStartMs = millis();
+    lastNtpAttemptMs = ntpSyncStartMs;
+
+    Serial.printf("[NTP] Starting sync (%s). Timeout: %lu ms\n", reason, NTP_SYNC_TIMEOUT_MS);
+    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+}
+
+void handleTimeSync() {
+    if (!ENABLE_TIME_SYNC) {
+        // Time sync disabled - ensure preset time is applied
+        if (!fallbackTimeApplied) {
+            applyPresetTimeFallback();
+        }
+        return;
+    }
+
+    unsigned long currentMs = millis();
+
+    if (ntpSyncEventPending) {
+        ntpSyncEventPending = false;
+        char timestamp[32];
+        if (getCurrentTimestamp(timestamp, sizeof(timestamp))) {
+            Serial.printf("[NTP] ✓ Time synchronized: %s\n", timestamp);
+        } else {
+            Serial.println(F("[NTP] ✓ Time synchronized"));
+        }
+    }
+
+    if (ntpSyncInProgress && !ntpTimeSynced && (currentMs - ntpSyncStartMs >= NTP_SYNC_TIMEOUT_MS)) {
+        ntpSyncInProgress = false;
+        Serial.println(F("[NTP] Sync timeout after 10 seconds. Switching to preset time."));
+        applyPresetTimeFallback();
+    }
+
+    if (usingFallbackTime && !ntpTimeSynced && WiFi.status() == WL_CONNECTED && !ntpSyncInProgress &&
+        (lastNtpAttemptMs == 0 || currentMs - lastNtpAttemptMs >= NTP_RETRY_INTERVAL_MS)) {
+        Serial.println(F("[NTP] Retrying time sync while preset time is active..."));
+        startNtpSync("10-minute retry");
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════
 // EEPROM CREDENTIALS
@@ -269,7 +464,8 @@ int httpPostJson(const char* jsonPayload) {
 // JSON BUILDER
 // ═══════════════════════════════════════════════════════════════
 
-void buildSensorJson(char* buf, float mq135_vocPPM, float mq135_nh3PPM,
+void buildSensorJson(char* buf, float temperatureC, float humidityRH, bool aht10ReadOk,
+                     float mq135_vocPPM, float mq135_nh3PPM,
                      float mq136_h2sPPM, float mq136_nh3PPM, float mq136_coPPM,
                      float mq137_nh3PPM, const char* qualityLevel) {
     StaticJsonDocument<512> doc;
@@ -278,18 +474,22 @@ void buildSensorJson(char* buf, float mq135_vocPPM, float mq135_nh3PPM,
 
     // Timestamp
     char timestamp[32];
-    struct tm timeinfo;
-    if (getLocalTime(&timeinfo)) {
-        strftime(timestamp, sizeof(timestamp), "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
+    if (getCurrentTimestamp(timestamp, sizeof(timestamp))) {
+        doc["timestamp"] = timestamp;
     } else {
-        strcpy(timestamp, "1970-01-01T00:00:00Z");
+        doc["timestamp"] = "1970-01-01T00:00:00Z";
     }
-    doc["timestamp"] = timestamp;
 
     // Sensors
     JsonObject sensors = doc.createNestedObject("sensors");
-    sensors["temperature"] = 25.0;   // TODO: real sensor
-    sensors["humidity"]    = 60.0;   // TODO: real sensor
+    if (aht10ReadOk) {
+        sensors["temperature"] = temperatureC;
+        sensors["humidity"]    = humidityRH;
+    } else {
+        // Server requires numbers — send 0 as sentinel when AHT10 is unavailable
+        sensors["temperature"] = 0.0f;
+        sensors["humidity"]    = 0.0f;
+    }
     sensors["mq135_co2"]   = mq135_vocPPM;
     sensors["mq136_h2s"]   = mq136_h2sPPM;
     sensors["mq137_nh3"]   = mq137_nh3PPM;
@@ -300,7 +500,10 @@ void buildSensorJson(char* buf, float mq135_vocPPM, float mq135_nh3PPM,
 
     doc["wifi_rssi"] = WiFi.RSSI();
 
-    doc.createNestedObject("sensor_status");
+    JsonObject sensorStatus = doc.createNestedObject("sensor_status");
+    sensorStatus["aht10_ready"] = aht10Ready;
+    sensorStatus["aht10_read_ok"] = aht10ReadOk;
+    sensorStatus["time_source"] = ntpTimeSynced ? "ntp" : (fallbackTimeApplied ? "preset" : "unset");
 
     serializeJson(doc, buf, JSON_BUF_SIZE);
 }
@@ -532,9 +735,8 @@ void handlePortalLoop() {
         delay(5000);
         stopConfigPortal();
 
-        // Sync time after new connection
-        configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-        Serial.println(F("[NTP] Time re-synced."));
+        // Restart NTP sync after new connection
+        startNtpSync("portal connection");
     }
 }
 
@@ -595,6 +797,11 @@ void setup() {
     analogReadResolution(12);
     analogSetAttenuation(ADC_11db);
 
+    // I2C / AHT10
+    Wire.begin(AHT10_SDA_PIN, AHT10_SCL_PIN);
+    Serial.printf("[AHT10] I2C initialized on SDA=%d, SCL=%d\n", AHT10_SDA_PIN, AHT10_SCL_PIN);
+    initAHT10();
+
     // EEPROM
     EEPROM.begin(EEPROM_SIZE);
 
@@ -604,21 +811,13 @@ void setup() {
     if (hasCredentials) {
         Serial.println(F("[BOOT] Found saved credentials. Connecting..."));
         if (connectWiFi(wifi_ssid, wifi_pass)) {
-            // Sync time
-            configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-            Serial.print(F("[NTP] Waiting for time sync..."));
-            time_t now = time(nullptr);
-            while (now < 8 * 3600 * 2) {
-                delay(500);
-                Serial.print(F("."));
-                now = time(nullptr);
-            }
-            struct tm timeinfo;
-            getLocalTime(&timeinfo);
-            Serial.printf("\n[NTP] ✓ Synced: %s\n", asctime(&timeinfo));
+            startNtpSync("boot");
         } else {
             Serial.println(F("[BOOT] WiFi connection failed with saved credentials."));
             Serial.println(F("[BOOT] Type '1' + Enter in Serial Monitor to reconfigure WiFi."));
+            if (!ENABLE_TIME_SYNC) {
+                applyPresetTimeFallback();
+            }
         }
     } else {
         // No EEPROM credentials — use hardcoded defaults and save them
@@ -629,20 +828,13 @@ void setup() {
         saveCredentials(wifi_ssid, wifi_pass);
 
         if (connectWiFi(wifi_ssid, wifi_pass)) {
-            configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-            Serial.print(F("[NTP] Waiting for time sync..."));
-            time_t now = time(nullptr);
-            while (now < 8 * 3600 * 2) {
-                delay(500);
-                Serial.print(F("."));
-                now = time(nullptr);
-            }
-            struct tm timeinfo;
-            getLocalTime(&timeinfo);
-            Serial.printf("\n[NTP] ✓ Synced: %s\n", asctime(&timeinfo));
+            startNtpSync("boot");
         } else {
             Serial.println(F("[BOOT] Hardcoded WiFi failed."));
             Serial.println(F("[BOOT] Type '1' + Enter in Serial Monitor to configure WiFi."));
+            if (!ENABLE_TIME_SYNC) {
+                applyPresetTimeFallback();
+            }
         }
     }
 
@@ -654,6 +846,10 @@ void setup() {
     Serial.printf("  Interval: %lu ms\n", READ_INTERVAL_MS);
     Serial.printf("  Queue: %d entries, drain %d/cycle\n", MAX_QUEUE, DRAIN_PER_CYCLE);
     Serial.printf("  Voltage Divider: 4.7k/9k (ratio %.4f)\n", VOLTAGE_DIVIDER_RATIO);
+    Serial.printf("  NTP Timeout: %lu ms, Retry: %lu ms\n", NTP_SYNC_TIMEOUT_MS, NTP_RETRY_INTERVAL_MS);
+    Serial.printf("  AHT10: SDA=%d SCL=%d Addr=0x%02X Status=%s\n",
+                  AHT10_SDA_PIN, AHT10_SCL_PIN, AHT10_ADDRESS,
+                  aht10Ready ? "READY" : "NOT DETECTED");
     Serial.println(F(""));
     Serial.println(F("R0 VALUES (24-hour burn-in):"));
     Serial.printf("  MQ135: %.2f Ω\n", MQ135_R0);
@@ -685,6 +881,8 @@ void loop() {
         return;  // Don't do sensor readings while in config mode
     }
 
+    handleTimeSync();
+
     // ── Check WiFi ──
     if (WiFi.status() != WL_CONNECTED) {
         if (strlen(wifi_ssid) > 0) {
@@ -692,17 +890,33 @@ void loop() {
             if (!connectWiFi(wifi_ssid, wifi_pass, 10000)) {
                 Serial.println(F("[WiFi] Reconnect failed. Will retry next cycle."));
                 Serial.println(F("       Type '1' + Enter to reconfigure WiFi."));
+            } else if (!ntpTimeSynced && ENABLE_TIME_SYNC) {
+                startNtpSync(usingFallbackTime ? "reconnect while using preset time" : "reconnect");
             }
         }
         // If no credentials, just skip — user needs to type "1"
     }
 
+    handleTimeSync();
+
     // ── Sensor reading cycle ──
     unsigned long currentTime = millis();
+    if (!ntpTimeSynced && !fallbackTimeApplied) {
+        if (currentTime - lastTimeWaitLogMs >= 2000) {
+            Serial.println(F("[NTP] Waiting for initial sync (max 10s) before sending timestamped data..."));
+            lastTimeWaitLogMs = currentTime;
+        }
+        return;
+    }
+
     if (currentTime - lastReadTime < READ_INTERVAL_MS) {
         return;
     }
     lastReadTime = currentTime;
+
+    if (!aht10Ready && (lastAht10InitAttempt == 0 || currentTime - lastAht10InitAttempt >= AHT10_RETRY_MS)) {
+        initAHT10();
+    }
 
     // ── 1. Drain queue first (up to DRAIN_PER_CYCLE) ──
     if (queueCount > 0 && WiFi.status() == WL_CONNECTED) {
@@ -711,6 +925,10 @@ void loop() {
     }
 
     // ── 2. Read sensors ──
+    float temperatureC = NAN;
+    float humidityRH = NAN;
+    bool aht10ReadOk = readAHT10(temperatureC, humidityRH);
+
     int adcMQ135 = analogRead(MQ135_PIN);
     int adcMQ136 = analogRead(MQ136_PIN);
     int adcMQ137 = analogRead(MQ137_PIN);
@@ -738,13 +956,19 @@ void loop() {
     const char* qualityLevel;
     if (fresh)         qualityLevel = "EXCELLENT";
     else if (good)     qualityLevel = "GOOD";
-    else if (moderate) qualityLevel = "FAIR";
-    else               qualityLevel = "SPOILED";
+    else if (moderate) qualityLevel = "MODERATE";
+    else               qualityLevel = "CRITICAL";
 
     // ── 4. Print readings ──
     Serial.println(F("════════════════════════════════════════"));
     Serial.println(F("SENSOR READINGS:"));
     Serial.println(F("────────────────────────────────────────"));
+    if (aht10ReadOk) {
+        Serial.printf("AHT10  Temp:%.2f C  Hum:%.2f %%RH\n", temperatureC, humidityRH);
+    } else {
+        Serial.printf("AHT10  Temp/Hum unavailable (%s)\n",
+                      aht10Ready ? "read failed" : "not detected");
+    }
     Serial.printf("MQ135  ADC:%-4d V:%.3f Rs:%.1f  VOC:%.2f NH3:%.2f ppm\n",
                   adcMQ135, vMQ135, rsMQ135, mq135_voc, mq135_nh3);
     Serial.printf("MQ136  ADC:%-4d V:%.3f Rs:%.1f  H2S:%.2f NH3:%.2f CO:%.2f ppm\n",
@@ -757,7 +981,8 @@ void loop() {
 
     // ── 5. Build JSON and send (or queue) ──
     char jsonBuf[JSON_BUF_SIZE];
-    buildSensorJson(jsonBuf, mq135_voc, mq135_nh3,
+    buildSensorJson(jsonBuf, temperatureC, humidityRH, aht10ReadOk,
+                    mq135_voc, mq135_nh3,
                     mq136_h2s, mq136_nh3, mq136_co,
                     mq137_nh3, qualityLevel);
 

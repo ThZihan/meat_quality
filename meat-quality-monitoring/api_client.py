@@ -99,21 +99,32 @@ def api_get(endpoint: str, params: dict = None) -> Optional[Any]:
 
 def normalize_current(data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Normalize a /current API response into a common reading dict.
+    Normalize a /latest API response into a common reading dict.
 
-    /current fields: temperature, humidity, co2_ppm, h2s_ppm, nh3_ppm, quality
+    Server returns: {"count": N, "readings": [{...}]}
+    Each reading has: id, device_id, reading_time, temperature, humidity,
+                      mq135_co2, mq136_h2s, mq137_nh3, quality_level, wifi_rssi
     """
+    # Extract readings array from server response
+    readings = data.get("readings", [])
+    if not readings:
+        logger.warning("No readings in /latest response")
+        return None
+
+    # Get the most recent reading (first in array)
+    reading = readings[0]
+
     return {
-        "id": int(data.get("id", 0)),
-        "device_id": data.get("device_id", "ESP32-MeatMonitor"),
-        "reading_time": data.get("timestamp", ""),
-        "temperature": float(data.get("temperature", 0.0)),
-        "humidity": float(data.get("humidity", 0.0)),
-        "mq135_co2": float(data.get("co2_ppm", 0.0)),
-        "mq136_h2s": float(data.get("h2s_ppm", 0.0)),
-        "mq137_nh3": float(data.get("nh3_ppm", 0.0)),
-        "quality_level": data.get("quality", "UNKNOWN"),
-        "wifi_rssi": data.get("wifi_rssi"),
+        "id": int(reading.get("id", 0)),
+        "device_id": reading.get("device_id", "ESP32-MeatMonitor"),
+        "reading_time": reading.get("reading_time", ""),
+        "temperature": float(reading.get("temperature", 0.0)),
+        "humidity": float(reading.get("humidity", 0.0)),
+        "mq135_co2": float(reading.get("mq135_co2", 0.0)),
+        "mq136_h2s": float(reading.get("mq136_h2s", 0.0)),
+        "mq137_nh3": float(reading.get("mq137_nh3", 0.0)),
+        "quality_level": reading.get("quality_level", "UNKNOWN"),
+        "wifi_rssi": reading.get("wifi_rssi"),
     }
 
 
@@ -224,11 +235,14 @@ def poll_current(bookmark: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         Updated bookmark dict
     """
-    data = api_get("/current")
+    data = api_get("/latest")
     if data is None:
         return bookmark
 
     reading = normalize_current(data)
+    if reading is None:
+        return bookmark
+
     reading_id = reading["id"]
     last_id = bookmark.get("last_id", 0)
 
@@ -266,7 +280,7 @@ class SensorAPIClient:
         headers = {"x-api-key": config.SENSOR_API_KEY}
         try:
             resp = requests.get(
-                f"{config.SENSOR_API_BASE}/current",
+                f"{config.SENSOR_API_BASE}/latest",
                 headers=headers,
                 timeout=config.SENSOR_API_TIMEOUT,
             )

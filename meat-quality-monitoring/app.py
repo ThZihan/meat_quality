@@ -19,11 +19,12 @@ import matplotlib.pyplot as plt
 from PIL import Image
 import io
 import time
+import logging
 from datetime import datetime
 
 # Import project modules
 import config
-from api_client import get_api_client
+from api_client import get_api_client, load_bookmark, poll_current, catch_up
 from mqtt_client_simple import map_quality_level, determine_gas_status
 from db_manager import get_db_manager
 from mock_data import get_time_elapsed, get_fusion_decision, get_readings
@@ -40,6 +41,8 @@ from camera_config import (
 )
 from image_capture import ImageCapture
 
+
+logger = logging.getLogger(__name__)
 
 CAPTURE_SERVICE_NAME = "pi-image-capture.service"
 SYSTEMCTL_BIN = "/usr/bin/systemctl"
@@ -304,6 +307,12 @@ if 'api_connected' not in st.session_state:
 if 'last_db_check' not in st.session_state:
     st.session_state.last_db_check = 0
 
+if 'last_api_poll' not in st.session_state:
+    st.session_state.last_api_poll = 0
+
+if 'api_catchup_done' not in st.session_state:
+    st.session_state.api_catchup_done = False
+
 
 # Sidebar controls
 with st.sidebar:
@@ -329,29 +338,42 @@ with st.sidebar:
     if st.session_state.data_mode == 'api':
         api_client = get_api_client()
         
-        # Show background service bookmark info
+        # Show connection status based on bookmark AND database readings
         bookmark = api_client.get_bookmark_info()
+        db = get_db_manager()
+        reading_count = db.get_reading_count()
+        
         if bookmark.get("last_id", 0) > 0:
             st.success("✅ Sensor Data Active")
             st.caption(f"Last reading ID: {bookmark['last_id']}")
+        elif reading_count > 0:
+            st.success("✅ Sensor Data Active")
+            st.caption(f"Database has {reading_count} readings. Bookmark will update on next poll.")
         else:
             st.warning("⚠️ No data yet")
             st.caption("Start the background client to fetch data.")
         
         # Test connection button
         if st.button("🔄 Test API Connection"):
-            reading = api_client.fetch_current()
-            if reading is not None:
+            raw = api_client.fetch_current()
+            if raw is not None:
                 st.session_state.api_connected = True
                 st.success("Connection successful!")
-                st.json({
-                    "temperature": reading.get("temperature"),
-                    "humidity": reading.get("humidity"),
-                    "h2s_ppm": reading.get("h2s_ppm"),
-                    "nh3_ppm": reading.get("nh3_ppm"),
-                    "co2_ppm": reading.get("co2_ppm"),
-                    "quality": reading.get("quality"),
-                })
+                # Unwrap server response envelope
+                readings = raw.get("readings", [])
+                if readings:
+                    r = readings[0]
+                    st.json({
+                        "id": r.get("id"),
+                        "temperature": r.get("temperature"),
+                        "humidity": r.get("humidity"),
+                        "mq135_co2": r.get("mq135_co2"),
+                        "mq136_h2s": r.get("mq136_h2s"),
+                        "mq137_nh3": r.get("mq137_nh3"),
+                        "quality_level": r.get("quality_level"),
+                    })
+                else:
+                    st.warning("API reachable but no readings found on server.")
             else:
                 st.error(f"Connection failed: {api_client.last_error}")
     
@@ -691,10 +713,30 @@ if st.session_state.data_mode == 'mock' and st.session_state.simulation_running:
         st.rerun()
 
 elif st.session_state.data_mode == 'api':
-    # Load data from local database (background service handles API fetching)
+    # Poll remote API for new data and load from local database
     current_time = time.time()
     
     if current_time - st.session_state.last_db_check >= config.CHART_REFRESH_INTERVAL:
+        # Poll the remote API and store new readings in local DB
+        if current_time - st.session_state.last_api_poll >= config.SENSOR_API_POLL_INTERVAL:
+            try:
+                bookmark = load_bookmark()
+                
+                # Run catch-up on first load to recover missed readings
+                if not st.session_state.api_catchup_done:
+                    logger.info("Running API catch-up for missed readings...")
+                    bookmark = catch_up(bookmark)
+                    st.session_state.api_catchup_done = True
+                
+                new_bookmark = poll_current(bookmark)
+                if new_bookmark != bookmark:
+                    logger.debug("New reading stored from API poll")
+            except Exception as e:
+                logger.warning(f"API poll failed: {e}")
+            
+            st.session_state.last_api_poll = current_time
+        
+        # Load data from local database
         db = get_db_manager()
         recent_readings = db.get_recent_readings(limit=config.HISTORY_DISPLAY_COUNT)
         
@@ -885,11 +927,20 @@ with left_col:
         # Display image from session state (persists across reruns)
         st.image(st.session_state.uploaded_image_bytes, width='stretch', caption="Captured from Camera")
     elif st.session_state.data_mode == 'api' and sync_state_summary and sync_state_summary['latest_pending_path']:
-        st.image(
-            str(sync_state_summary['latest_pending_path']),
-            width='stretch',
-            caption=f"Latest pending capture: {sync_state_summary['latest_pending_path'].name}"
-        )
+        latest_pending = sync_state_summary['latest_pending_path']
+        # Guard against 0-byte or corrupt image files that PIL cannot identify
+        try:
+            file_size = latest_pending.stat().st_size
+            if file_size > 0:
+                st.image(
+                    str(latest_pending),
+                    width='stretch',
+                    caption=f"Latest pending capture: {latest_pending.name}"
+                )
+            else:
+                st.warning(f"Latest pending capture is empty (0 bytes): {latest_pending.name}")
+        except Exception as img_err:
+            st.warning(f"Cannot display latest pending capture: {img_err}")
     else:
         if st.session_state.data_mode == 'api':
             st.info(

@@ -37,10 +37,10 @@ SENSOR_API_HISTORY_LIMIT = int(os.environ.get("SENSOR_API_HISTORY_LIMIT", "5000"
 SENSOR_API_CATCHUP_FAILURE_THRESHOLD = int(os.environ.get("SENSOR_API_CATCHUP_FAILURE_THRESHOLD", "5"))  # consecutive failures before re-catch-up
 
 # Bookmark file — tracks last seen reading ID for recovery
-BOOKMARK_FILE = os.environ.get(
+BOOKMARK_FILE = os.path.expanduser(os.environ.get(
     "BOOKMARK_FILE",
-    os.path.expanduser("~/.meat_monitor_bookmark.json")
-)
+    "~/.meat_monitor_bookmark.json"
+))
 
 # ============================================================================
 # MQTT Configuration (legacy - kept for reference)
