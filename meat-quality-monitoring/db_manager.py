@@ -454,16 +454,25 @@ class DatabaseManager:
                 # Delete all fusion decisions
                 cursor.execute('DELETE FROM fusion_decisions')
                 fusion_deleted = cursor.rowcount
+
+                # Reset AUTOINCREMENT counters so new rows start from 1 again.
+                # SQLite keeps these counters in sqlite_sequence even after DELETE.
+                cursor.execute('''
+                    DELETE FROM sqlite_sequence
+                    WHERE name IN ('sensor_readings', 'visual_predictions', 'fusion_decisions')
+                ''')
                 
                 conn.commit()
                 
                 logger.info(f"All data deleted: {sensor_deleted} sensor readings, "
-                          f"{visual_deleted} visual predictions, {fusion_deleted} fusion decisions")
+                          f"{visual_deleted} visual predictions, {fusion_deleted} fusion decisions; "
+                          "AUTOINCREMENT counters reset")
                 
                 return {
                     'sensor_readings': sensor_deleted,
                     'visual_predictions': visual_deleted,
-                    'fusion_decisions': fusion_deleted
+                    'fusion_decisions': fusion_deleted,
+                    'id_counters_reset': True
                 }
                 
         except Exception as e:

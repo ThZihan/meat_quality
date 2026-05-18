@@ -48,9 +48,9 @@ from light_detector import (
 )
 
 
-DEFAULT_PENDING_DIR = Path(os.getenv("PENDING_SYNC_DIR", "/home/pi/pending_sync"))
-DEFAULT_DB_PATH = Path(os.getenv("SYNC_DB_PATH", "/home/pi/sync_state.db"))
-DEFAULT_INTERVAL_SECONDS = 30
+DEFAULT_PENDING_DIR = Path(os.getenv("PENDING_SYNC_DIR", "/home/zihan/pending_sync"))
+DEFAULT_DB_PATH = Path(os.getenv("SYNC_DB_PATH", "/home/zihan/sync_state.db"))
+DEFAULT_INTERVAL_SECONDS = 60
 DEFAULT_SIMULATED_IMAGE_SIZE = 1_500_000
 
 

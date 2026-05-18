@@ -49,21 +49,26 @@
 #include <Wire.h>
 #include <WebServer.h>
 #include <DNSServer.h>
-#include <HTTPClient.h>
+#include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <time.h>
 #include <sys/time.h>
 #include <EEPROM.h>
-#include <Adafruit_AHTX0.h>
+#include <Adafruit_BME280.h>
 #include "sntp.h"
 
 // ═══════════════════════════════════════════════════════════════
 // CONFIGURATION
 // ═══════════════════════════════════════════════════════════════
 
-// HTTP API
-const char* API_URL   = "https://meat-monitor.kalobiral.com.bd/api/meat-data";
-const char* API_KEY   = "aa8a531a309e574c7fef976850416e7613984ba03f4cf370";  // Set before flashing
+// MQTT Broker — Pi hotspot gateway IP (fixed, never changes)
+const char* MQTT_BROKER = "192.168.4.1";
+const int MQTT_PORT = 1883;
+const char* MQTT_TOPIC = "meat-quality/data";
+const char* MQTT_CLIENT_ID = "ESP32-MeatMonitor";
+const char* MQTT_USERNAME = "meat_monitor";
+const char* MQTT_PASSWORD = "meat_monitor";
+
 const char* DEVICE_ID = "ESP32-MeatMonitor";
 
 // SoftAP Config Portal
@@ -71,7 +76,8 @@ const char* AP_SSID     = "ESP32-Setup";
 const char* AP_PASSWORD = "12345678";  // Set before flashing
 
 // Timing
-const unsigned long READ_INTERVAL_MS = 3000;  // 3 seconds
+const unsigned long READ_INTERVAL_MS = 5000;  // 5 seconds
+const unsigned long MQTT_RECONNECT_INTERVAL_MS = 5000;
 
 // Queue
 const int MAX_QUEUE       = 20;
@@ -90,13 +96,13 @@ const int JSON_BUF_SIZE   = 512;
 const int MQ135_PIN = 35;  // ADC1_CH6
 const int MQ136_PIN = 34;  // ADC1_CH7
 const int MQ137_PIN = 32;  // ADC1_CH4
-const int AHT10_SDA_PIN = 21;
-const int AHT10_SCL_PIN = 22;
-const uint8_t AHT10_ADDRESS = 0x38;
+const int BME_SDA_PIN = 21;
+const int BME_SCL_PIN = 22;
+const uint8_t BME_ADDRESS = 0x76;  // BME280 default; code also tries 0x77
 const float VOLTAGE_DIVIDER_RATIO = 1.5222;  // 4.7k upper, 9k lower
 const float ESP32_VREF = 3.3;
 const int ADC_RESOLUTION = 4095;
-const unsigned long AHT10_RETRY_MS = 5000;
+const unsigned long BME_RETRY_MS = 5000;
 const unsigned long NTP_SYNC_TIMEOUT_MS = 10000;
 const unsigned long NTP_RETRY_INTERVAL_MS = 10UL * 60UL * 1000UL;
 const time_t PRESET_TIME_UTC = 1778652000;  // 2026-05-13T12:00:00Z — updated fallback if NTP fails
@@ -133,7 +139,8 @@ const float MQ137_NH3_B = -2.473;
 // ═══════════════════════════════════════════════════════════════
 // FORWARD DECLARATIONS
 // ═══════════════════════════════════════════════════════════════
-int httpPostJson(const char* jsonPayload);
+int publishJson(const char* jsonPayload);
+void ensureMqttConnection();
 
 // ═══════════════════════════════════════════════════════════════
 // GLOBAL STATE
@@ -142,6 +149,11 @@ int httpPostJson(const char* jsonPayload);
 // WiFi credentials (loaded from EEPROM)
 char wifi_ssid[65] = "";
 char wifi_pass[65] = "";
+
+// MQTT client
+WiFiClient mqttWifiClient;
+PubSubClient mqttClient(mqttWifiClient);
+unsigned long lastMqttReconnectAttempt = 0;
 
 // Offline queue
 struct QueuedPayload {
@@ -164,10 +176,10 @@ WebServer* portalServer = nullptr;
 DNSServer* dnsServer    = nullptr;
 bool portalActive       = false;
 
-// AHT10 temperature/humidity sensor
-Adafruit_AHTX0 aht10;
-bool aht10Ready = false;
-unsigned long lastAht10InitAttempt = 0;
+// BME280 temperature/humidity/pressure sensor
+Adafruit_BME280 bme;
+bool bmeReady = false;
+unsigned long lastBmeInitAttempt = 0;
 
 // Time synchronization / fallback clock
 volatile bool ntpTimeSynced = false;
@@ -180,7 +192,7 @@ unsigned long lastNtpAttemptMs = 0;
 unsigned long lastTimeWaitLogMs = 0;
 
 // ═══════════════════════════════════════════════════════════════
-// AHT10 TEMPERATURE/HUMIDITY SENSOR
+// BME280 TEMPERATURE/HUMIDITY/PRESSURE SENSOR
 // ═══════════════════════════════════════════════════════════════
 
 bool isI2CDevicePresent(uint8_t address) {
@@ -188,52 +200,52 @@ bool isI2CDevicePresent(uint8_t address) {
     return Wire.endTransmission() == 0;
 }
 
-bool initAHT10() {
-    lastAht10InitAttempt = millis();
-    Serial.println(F("[AHT10] Initializing sensor..."));
+bool initBME280() {
+    lastBmeInitAttempt = millis();
+    Serial.println(F("[BME280] Initializing sensor..."));
 
-    if (!isI2CDevicePresent(AHT10_ADDRESS)) {
-        Serial.println(F("[AHT10] Sensor not found at I2C address 0x38"));
-        aht10Ready = false;
+    uint8_t detectedAddress = BME_ADDRESS;
+    if (!isI2CDevicePresent(detectedAddress)) {
+        Serial.println(F("[BME280] Sensor not found at 0x76, trying 0x77..."));
+        detectedAddress = 0x77;
+        if (!isI2CDevicePresent(detectedAddress)) {
+            Serial.println(F("[BME280] Sensor not found at either 0x76 or 0x77"));
+            bmeReady = false;
+            return false;
+        }
+    }
+
+    if (!bme.begin(detectedAddress, &Wire)) {
+        Serial.printf("[BME280] Sensor detected at 0x%02X, but initialization failed\n", detectedAddress);
+        bmeReady = false;
         return false;
     }
 
-    if (!aht10.begin(&Wire)) {
-        Serial.println(F("[AHT10] Sensor detected on I2C, but initialization failed"));
-        aht10Ready = false;
-        return false;
-    }
-
-    aht10Ready = true;
-    Serial.println(F("[AHT10] ✓ Sensor initialized successfully"));
+    bmeReady = true;
+    Serial.printf("[BME280] ✓ Sensor initialized successfully at 0x%02X\n", detectedAddress);
     return true;
 }
 
-bool readAHT10(float& temperatureC, float& humidityRH) {
-    if (!aht10Ready) {
+bool readBME280(float& temperatureC, float& humidityRH) {
+    if (!bmeReady) {
         return false;
     }
 
-    sensors_event_t humidityEvent;
-    sensors_event_t temperatureEvent;
-    aht10.getEvent(&humidityEvent, &temperatureEvent);
-
-    temperatureC = temperatureEvent.temperature;
-    humidityRH = humidityEvent.relative_humidity;
+    temperatureC = bme.readTemperature();
+    humidityRH = bme.readHumidity();
 
     if (isnan(temperatureC) || isnan(humidityRH)) {
-        Serial.println(F("[AHT10] Invalid reading (NaN). Marking sensor unavailable."));
-        aht10Ready = false;
+        Serial.println(F("[BME280] Invalid reading (NaN). Marking sensor unavailable."));
+        bmeReady = false;
         return false;
     }
 
-    // Range validation: AHT10 spec is -40°C to 85°C, 0-100% RH
-    // Garbage I2C data can produce valid floats that are physically impossible
+    // Range validation: BME280 spec is -40°C to 85°C, 0-100% RH
     if (temperatureC < -40.0 || temperatureC > 85.0 ||
         humidityRH < 0.0 || humidityRH > 100.0) {
-        Serial.printf("[AHT10] Out-of-range reading: Temp=%.2f°C Hum=%.2f%%RH — discarding\n",
+        Serial.printf("[BME280] Out-of-range reading: Temp=%.2f°C Hum=%.2f%%RH — discarding\n",
                       temperatureC, humidityRH);
-        return false;  // Don't mark sensor unavailable; could be transient glitch
+        return false;
     }
 
     return true;
@@ -416,7 +428,7 @@ void drainQueue() {
         Serial.printf("[QUEUE] Draining %d/%d (attempt %d/%d)...\n",
                       1, queueCount, drained + 1, DRAIN_PER_CYCLE);
 
-        int code = httpPostJson(queue[0].json);
+        int code = publishJson(queue[0].json);
         if (code == 200 || code == 201) {
             // Success — shift remaining items forward
             for (int i = 0; i < queueCount - 1; i++) {
@@ -437,34 +449,65 @@ void drainQueue() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// HTTP COMMUNICATION
+// MQTT COMMUNICATION
 // ═══════════════════════════════════════════════════════════════
 
-int httpPostJson(const char* jsonPayload) {
-    HTTPClient http;
-    http.begin(API_URL);
-    http.addHeader("Content-Type", "application/json");
-    http.addHeader("X-API-Key", API_KEY);
-    http.setTimeout(10000);
-
-    int httpCode = http.POST(jsonPayload);
-
-    if (httpCode > 0) {
-        String response = http.getString();
-        Serial.printf("  HTTP %d: %s\n", httpCode, response.c_str());
-    } else {
-        Serial.printf("  HTTP error: %s\n", http.errorToString(httpCode).c_str());
+void ensureMqttConnection() {
+    if (WiFi.status() != WL_CONNECTED) {
+        return;
     }
 
-    http.end();
-    return httpCode;
+    if (mqttClient.connected()) {
+        return;
+    }
+
+    unsigned long now = millis();
+    if (lastMqttReconnectAttempt != 0 && (now - lastMqttReconnectAttempt) < MQTT_RECONNECT_INTERVAL_MS) {
+        return;
+    }
+    lastMqttReconnectAttempt = now;
+
+    Serial.printf("[MQTT] Connecting to %s:%d...\n", MQTT_BROKER, MQTT_PORT);
+
+    bool connected = false;
+    if (strlen(MQTT_USERNAME) > 0) {
+        connected = mqttClient.connect(MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD);
+    } else {
+        connected = mqttClient.connect(MQTT_CLIENT_ID);
+    }
+
+    if (connected) {
+        Serial.println(F("[MQTT] ✓ Connected"));
+        return;
+    }
+
+    Serial.printf("[MQTT] ✗ Connect failed, state=%d\n", mqttClient.state());
+}
+
+int publishJson(const char* jsonPayload) {
+    ensureMqttConnection();
+
+    if (!mqttClient.connected()) {
+        return 503;
+    }
+
+    bool ok = mqttClient.publish(MQTT_TOPIC, jsonPayload, false);
+    mqttClient.loop();
+
+    if (ok) {
+        Serial.printf("  MQTT publish OK (topic=%s, bytes=%u)\n", MQTT_TOPIC, (unsigned int)strlen(jsonPayload));
+        return 200;
+    }
+
+    Serial.printf("  MQTT publish failed (state=%d)\n", mqttClient.state());
+    return 500;
 }
 
 // ═══════════════════════════════════════════════════════════════
 // JSON BUILDER
 // ═══════════════════════════════════════════════════════════════
 
-void buildSensorJson(char* buf, float temperatureC, float humidityRH, bool aht10ReadOk,
+void buildSensorJson(char* buf, float temperatureC, float humidityRH, bool bmeReadOk,
                      float mq135_vocPPM, float mq135_nh3PPM,
                      float mq136_h2sPPM, float mq136_nh3PPM, float mq136_coPPM,
                      float mq137_nh3PPM, const char* qualityLevel) {
@@ -482,11 +525,11 @@ void buildSensorJson(char* buf, float temperatureC, float humidityRH, bool aht10
 
     // Sensors
     JsonObject sensors = doc.createNestedObject("sensors");
-    if (aht10ReadOk) {
+    if (bmeReadOk) {
         sensors["temperature"] = temperatureC;
         sensors["humidity"]    = humidityRH;
     } else {
-        // Server requires numbers — send 0 as sentinel when AHT10 is unavailable
+        // Server requires numbers — send 0 as sentinel when BME280 is unavailable
         sensors["temperature"] = 0.0f;
         sensors["humidity"]    = 0.0f;
     }
@@ -501,8 +544,8 @@ void buildSensorJson(char* buf, float temperatureC, float humidityRH, bool aht10
     doc["wifi_rssi"] = WiFi.RSSI();
 
     JsonObject sensorStatus = doc.createNestedObject("sensor_status");
-    sensorStatus["aht10_ready"] = aht10Ready;
-    sensorStatus["aht10_read_ok"] = aht10ReadOk;
+    sensorStatus["bme280_ready"] = bmeReady;
+    sensorStatus["bme280_read_ok"] = bmeReadOk;
     sensorStatus["time_source"] = ntpTimeSynced ? "ntp" : (fallbackTimeApplied ? "preset" : "unset");
 
     serializeJson(doc, buf, JSON_BUF_SIZE);
@@ -744,10 +787,23 @@ void handlePortalLoop() {
 // WIFI CONNECTION
 // ═══════════════════════════════════════════════════════════════
 
-bool connectWiFi(const char* ssid, const char* pass, int timeoutMs = 15000) {
+bool connectWiFi(const char* ssid, const char* pass, int timeoutMs = 30000) {
     Serial.printf("[WiFi] Connecting to: %s\n", ssid);
+
+    // Full reset of WiFi stack
+    WiFi.disconnect(true);
+    delay(300);
     WiFi.mode(WIFI_STA);
-    WiFi.begin(ssid, pass);
+    delay(100);
+
+    // Pi hotspot BSSID and channel (fixed, never changes)
+    // BSSID: 2C:CF:67:08:94:61, Channel: 1
+    uint8_t bssid[6] = {0x2C, 0xCF, 0x67, 0x08, 0x94, 0x61};
+    Serial.printf("[WiFi] Connecting with BSSID=%02X:%02X:%02X:%02X:%02X:%02X ch=1\n",
+                  bssid[0], bssid[1], bssid[2], bssid[3], bssid[4], bssid[5]);
+
+    // Use BSSID-specific connect to bypass ESP32 internal scan bug
+    WiFi.begin(ssid, pass, 1, bssid);
 
     unsigned long start = millis();
     while (WiFi.status() != WL_CONNECTED && (millis() - start < timeoutMs)) {
@@ -761,7 +817,25 @@ bool connectWiFi(const char* ssid, const char* pass, int timeoutMs = 15000) {
         return true;
     }
 
-    Serial.println(F("\n[WiFi] ✗ Connection failed!"));
+    Serial.printf("\n[WiFi] ✗ Connection failed! (status: %d)\n", WiFi.status());
+    // Fallback: try without BSSID
+    Serial.println(F("[WiFi] Retrying without BSSID..."));
+    WiFi.disconnect(true);
+    delay(300);
+    WiFi.mode(WIFI_STA);
+    delay(100);
+    WiFi.begin(ssid, pass);
+    start = millis();
+    while (WiFi.status() != WL_CONNECTED && (millis() - start < timeoutMs)) {
+        delay(500);
+        Serial.print(F("."));
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.printf("\n[WiFi] ✓ Connected (fallback)! IP: %s, RSSI: %d dBm\n",
+                      WiFi.localIP().toString().c_str(), WiFi.RSSI());
+        return true;
+    }
+    Serial.printf("\n[WiFi] ✗ Fallback also failed! (status: %d)\n", WiFi.status());
     return false;
 }
 
@@ -789,7 +863,7 @@ void setup() {
     delay(1000);
 
     Serial.println(F("\n╔══════════════════════════════════════════╗"));
-    Serial.println(F("║  MQ135+MQ136+MQ137 — HTTP API + Queue    ║"));
+    Serial.println(F("║  MQ135+MQ136+MQ137 — MQTT + Queue        ║"));
     Serial.println(F("║  ESP32 NodeMCU — SoftAP WiFi Portal      ║"));
     Serial.println(F("╚══════════════════════════════════════════╝\n"));
 
@@ -797,59 +871,44 @@ void setup() {
     analogReadResolution(12);
     analogSetAttenuation(ADC_11db);
 
-    // I2C / AHT10
-    Wire.begin(AHT10_SDA_PIN, AHT10_SCL_PIN);
-    Serial.printf("[AHT10] I2C initialized on SDA=%d, SCL=%d\n", AHT10_SDA_PIN, AHT10_SCL_PIN);
-    initAHT10();
+    // I2C / BME280
+    Wire.begin(BME_SDA_PIN, BME_SCL_PIN);
+    Serial.printf("[BME280] I2C initialized on SDA=%d, SCL=%d\n", BME_SDA_PIN, BME_SCL_PIN);
+    initBME280();
 
     // EEPROM
     EEPROM.begin(EEPROM_SIZE);
 
-    // Try to load saved credentials
-    bool hasCredentials = loadCredentials();
+    // Force-overwrite EEPROM with Pi hotspot credentials (ensures correct network)
+    Serial.println(F("[BOOT] Writing Pi hotspot credentials to EEPROM..."));
+    strncpy(wifi_ssid, "MeatMonitor-Pi", sizeof(wifi_ssid) - 1);
+    strncpy(wifi_pass, "MeatPi@12345", sizeof(wifi_pass) - 1);
+    saveCredentials(wifi_ssid, wifi_pass);
 
-    if (hasCredentials) {
-        Serial.println(F("[BOOT] Found saved credentials. Connecting..."));
-        if (connectWiFi(wifi_ssid, wifi_pass)) {
-            startNtpSync("boot");
-        } else {
-            Serial.println(F("[BOOT] WiFi connection failed with saved credentials."));
-            Serial.println(F("[BOOT] Type '1' + Enter in Serial Monitor to reconfigure WiFi."));
-            if (!ENABLE_TIME_SYNC) {
-                applyPresetTimeFallback();
-            }
-        }
+    Serial.println(F("[BOOT] Connecting to Pi hotspot..."));
+    if (connectWiFi(wifi_ssid, wifi_pass)) {
+        startNtpSync("boot");
     } else {
-        // No EEPROM credentials — use hardcoded defaults and save them
-        Serial.println(F("[BOOT] No saved WiFi credentials."));
-        Serial.println(F("[BOOT] Using hardcoded defaults and saving to EEPROM..."));
-        strncpy(wifi_ssid, "Lovly", sizeof(wifi_ssid) - 1);
-        strncpy(wifi_pass, "tweety@pichu", sizeof(wifi_pass) - 1);
-        saveCredentials(wifi_ssid, wifi_pass);
-
-        if (connectWiFi(wifi_ssid, wifi_pass)) {
-            startNtpSync("boot");
-        } else {
-            Serial.println(F("[BOOT] Hardcoded WiFi failed."));
-            Serial.println(F("[BOOT] Type '1' + Enter in Serial Monitor to configure WiFi."));
-            if (!ENABLE_TIME_SYNC) {
-                applyPresetTimeFallback();
-            }
+        Serial.println(F("[BOOT] Pi hotspot connection failed."));
+        Serial.println(F("[BOOT] Type '1' + Enter in Serial Monitor to configure WiFi."));
+        if (!ENABLE_TIME_SYNC) {
+            applyPresetTimeFallback();
         }
     }
 
     // Print config
     Serial.println(F(""));
     Serial.println(F("CONFIGURATION:"));
-    Serial.printf("  API: %s\n", API_URL);
+    Serial.printf("  MQTT Broker: %s:%d\n", MQTT_BROKER, MQTT_PORT);
+    Serial.printf("  MQTT Topic: %s\n", MQTT_TOPIC);
     Serial.printf("  Device: %s\n", DEVICE_ID);
     Serial.printf("  Interval: %lu ms\n", READ_INTERVAL_MS);
     Serial.printf("  Queue: %d entries, drain %d/cycle\n", MAX_QUEUE, DRAIN_PER_CYCLE);
     Serial.printf("  Voltage Divider: 4.7k/9k (ratio %.4f)\n", VOLTAGE_DIVIDER_RATIO);
     Serial.printf("  NTP Timeout: %lu ms, Retry: %lu ms\n", NTP_SYNC_TIMEOUT_MS, NTP_RETRY_INTERVAL_MS);
-    Serial.printf("  AHT10: SDA=%d SCL=%d Addr=0x%02X Status=%s\n",
-                  AHT10_SDA_PIN, AHT10_SCL_PIN, AHT10_ADDRESS,
-                  aht10Ready ? "READY" : "NOT DETECTED");
+    Serial.printf("  BME280: SDA=%d SCL=%d Addr=0x%02X/0x77 Status=%s\n",
+                  BME_SDA_PIN, BME_SCL_PIN, BME_ADDRESS,
+                  bmeReady ? "READY" : "NOT DETECTED");
     Serial.println(F(""));
     Serial.println(F("R0 VALUES (24-hour burn-in):"));
     Serial.printf("  MQ135: %.2f Ω\n", MQ135_R0);
@@ -859,6 +918,10 @@ void setup() {
     Serial.println(F("COMMANDS: Type '1' + Enter → WiFi config portal"));
     Serial.println(F(""));
     Serial.println(F("Starting sensor readings...\n"));
+
+    // Configure MQTT endpoint (connection attempts happen in loop)
+    mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
+    mqttClient.setBufferSize(JSON_BUF_SIZE);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -899,6 +962,12 @@ void loop() {
 
     handleTimeSync();
 
+    // Keep MQTT session alive / reconnect while WiFi is available
+    ensureMqttConnection();
+    if (mqttClient.connected()) {
+        mqttClient.loop();
+    }
+
     // ── Sensor reading cycle ──
     unsigned long currentTime = millis();
     if (!ntpTimeSynced && !fallbackTimeApplied) {
@@ -914,8 +983,8 @@ void loop() {
     }
     lastReadTime = currentTime;
 
-    if (!aht10Ready && (lastAht10InitAttempt == 0 || currentTime - lastAht10InitAttempt >= AHT10_RETRY_MS)) {
-        initAHT10();
+    if (!bmeReady && (lastBmeInitAttempt == 0 || currentTime - lastBmeInitAttempt >= BME_RETRY_MS)) {
+        initBME280();
     }
 
     // ── 1. Drain queue first (up to DRAIN_PER_CYCLE) ──
@@ -927,7 +996,7 @@ void loop() {
     // ── 2. Read sensors ──
     float temperatureC = NAN;
     float humidityRH = NAN;
-    bool aht10ReadOk = readAHT10(temperatureC, humidityRH);
+    bool bmeReadOk = readBME280(temperatureC, humidityRH);
 
     int adcMQ135 = analogRead(MQ135_PIN);
     int adcMQ136 = analogRead(MQ136_PIN);
@@ -956,18 +1025,18 @@ void loop() {
     const char* qualityLevel;
     if (fresh)         qualityLevel = "EXCELLENT";
     else if (good)     qualityLevel = "GOOD";
-    else if (moderate) qualityLevel = "MODERATE";
-    else               qualityLevel = "CRITICAL";
+    else if (moderate) qualityLevel = "FAIR";
+    else               qualityLevel = "SPOILED";
 
     // ── 4. Print readings ──
     Serial.println(F("════════════════════════════════════════"));
     Serial.println(F("SENSOR READINGS:"));
     Serial.println(F("────────────────────────────────────────"));
-    if (aht10ReadOk) {
-        Serial.printf("AHT10  Temp:%.2f C  Hum:%.2f %%RH\n", temperatureC, humidityRH);
+    if (bmeReadOk) {
+        Serial.printf("BME280 Temp:%.2f C  Hum:%.2f %%RH\n", temperatureC, humidityRH);
     } else {
-        Serial.printf("AHT10  Temp/Hum unavailable (%s)\n",
-                      aht10Ready ? "read failed" : "not detected");
+        Serial.printf("BME280 Temp/Hum unavailable (%s)\n",
+                      bmeReady ? "read failed" : "not detected");
     }
     Serial.printf("MQ135  ADC:%-4d V:%.3f Rs:%.1f  VOC:%.2f NH3:%.2f ppm\n",
                   adcMQ135, vMQ135, rsMQ135, mq135_voc, mq135_nh3);
@@ -981,19 +1050,19 @@ void loop() {
 
     // ── 5. Build JSON and send (or queue) ──
     char jsonBuf[JSON_BUF_SIZE];
-    buildSensorJson(jsonBuf, temperatureC, humidityRH, aht10ReadOk,
+    buildSensorJson(jsonBuf, temperatureC, humidityRH, bmeReadOk,
                     mq135_voc, mq135_nh3,
                     mq136_h2s, mq136_nh3, mq136_co,
                     mq137_nh3, qualityLevel);
 
     if (WiFi.status() == WL_CONNECTED) {
-        Serial.println(F("[LIVE] Sending current data..."));
-        int code = httpPostJson(jsonBuf);
+        Serial.println(F("[LIVE] Publishing current data via MQTT..."));
+        int code = publishJson(jsonBuf);
         if (code == 200 || code == 201) {
             httpSuccessCount++;
-            Serial.println(F("✓ Live data sent"));
+            Serial.println(F("✓ Live data published"));
         } else {
-            Serial.printf("✗ Live send failed (HTTP %d) — queuing\n", code);
+            Serial.printf("✗ Live publish failed (status %d) — queuing\n", code);
             enqueue(jsonBuf);
             httpFailCount++;
         }

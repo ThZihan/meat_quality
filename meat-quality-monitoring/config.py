@@ -43,17 +43,17 @@ BOOKMARK_FILE = os.path.expanduser(os.environ.get(
 ))
 
 # ============================================================================
-# MQTT Configuration (legacy - kept for reference)
+# MQTT Configuration (local Pi broker)
 # ============================================================================
 
 # MQTT Broker Settings
-MQTT_BROKER = os.environ.get("MQTT_BROKER", "localhost")
+MQTT_BROKER = os.environ.get("MQTT_BROKER", "127.0.0.1")
 MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
 MQTT_TOPIC = "meat-quality/data"
 MQTT_STATUS_TOPIC = "meat-quality/status"
 MQTT_LWT_TOPIC = "meat-quality/lwt"
-MQTT_USERNAME = os.environ.get("MQTT_USERNAME", "")
-MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD", "")
+MQTT_USERNAME = os.environ.get("MQTT_USERNAME", "meat_monitor")
+MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD", "meat_monitor")
 
 # MQTT Connection Settings
 MQTT_KEEPALIVE = 60  # Keep-alive interval in seconds

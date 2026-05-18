@@ -161,12 +161,9 @@ def upload_single_image(
 
     mark_uploaded(db_path, row["id"])
 
-    try:
-        file_path.unlink()
-    except OSError as error:
-        logger.error("Uploaded row id=%s but could not delete %s: %s", row["id"], file_path, error)
-    else:
-        logger.info("Uploaded and deleted %s", file_path)
+    # NOTE: Local files are kept on Pi — no deletion after upload.
+    # The server is offline; all data/pictures must remain in local storage.
+    logger.info("Uploaded row id=%s, keeping local file: %s", row["id"], file_path)
 
     time.sleep(throttle_seconds)
     return True

@@ -1,7 +1,7 @@
 """
 Multi-Modal Meat Quality Monitoring System Dashboard
 Streamlit application combining Computer Vision (Custom CNN) and Gas Sensors
-Supports both API (real sensor data) and Mock (simulation) modes
+Supports both local MQTT-fed data (real sensors) and Mock (simulation) modes
 """
 
 from typing import Optional
@@ -24,7 +24,6 @@ from datetime import datetime
 
 # Import project modules
 import config
-from api_client import get_api_client, load_bookmark, poll_current, catch_up
 from mqtt_client_simple import map_quality_level, determine_gas_status
 from db_manager import get_db_manager
 from mock_data import get_time_elapsed, get_fusion_decision, get_readings
@@ -49,7 +48,10 @@ SYSTEMCTL_BIN = "/usr/bin/systemctl"
 PYTHON_BIN = "/usr/bin/python3"
 SUDO_BIN = "/usr/bin/sudo"
 PENDING_SYNC_DIR = Path("/home/pi/pending_sync")
+LOCAL_IMAGES_DIR = Path("images")
 SYNC_LEDGER_PATH = Path("/home/pi/sync_state.db")
+PERSISTED_IMAGE_DIRS = tuple(dict.fromkeys((PENDING_SYNC_DIR, Path.home() / "pending_sync", LOCAL_IMAGES_DIR)))
+IMAGE_LEDGER_PATHS = tuple(dict.fromkeys((SYNC_LEDGER_PATH, Path.home() / "sync_state.db")))
 SYNC_SCRIPT_PATH = Path("/home/pi/meat-quality-monitoring/sync.py")
 
 
@@ -65,6 +67,73 @@ st.set_page_config(
 # Custom CSS for styling
 st.markdown("""
 <style>
+    /* Keep Streamlit's sidebar toggle available, but hide toolbar chrome */
+    .stAppHeader,
+    header[data-testid="stHeader"] {
+        background: transparent !important;
+        height: 3rem !important;
+        min-height: 3rem !important;
+        overflow: visible !important;
+        pointer-events: auto !important;
+        z-index: 999999 !important;
+    }
+
+    .stAppToolbar,
+    div[data-testid="stToolbar"],
+    div[data-testid="stStatusWidget"],
+    div[data-testid="stToolbarActions"],
+    #MainMenu {
+        display: none !important;
+        visibility: hidden !important;
+        height: 0 !important;
+    }
+
+    /* Blue show/hide button for the sidebar */
+    div[data-testid="stSidebarCollapsedControl"],
+    div[data-testid="collapsedControl"] {
+        position: fixed !important;
+        top: 0.75rem !important;
+        left: 0.75rem !important;
+        z-index: 1000000 !important;
+        pointer-events: auto !important;
+    }
+
+    div[data-testid="stSidebarCollapsedControl"] button,
+    div[data-testid="collapsedControl"] button,
+    section[data-testid="stSidebar"] button[kind="header"],
+    section[data-testid="stSidebar"] button[kind="headerNoPadding"],
+    button[data-testid="stBaseButton-header"],
+    button[data-testid="baseButton-header"] {
+        background-color: #0D6EFD !important;
+        color: #FFFFFF !important;
+        border: 1px solid #0A58CA !important;
+        border-radius: 10px !important;
+        box-shadow: 0 3px 8px rgba(13, 110, 253, 0.35) !important;
+        min-width: 2.5rem !important;
+        min-height: 2.5rem !important;
+        pointer-events: auto !important;
+    }
+
+    div[data-testid="stSidebarCollapsedControl"] button:hover,
+    div[data-testid="collapsedControl"] button:hover,
+    section[data-testid="stSidebar"] button[kind="header"]:hover,
+    section[data-testid="stSidebar"] button[kind="headerNoPadding"]:hover,
+    button[data-testid="stBaseButton-header"]:hover,
+    button[data-testid="baseButton-header"]:hover {
+        background-color: #0A58CA !important;
+        border-color: #084298 !important;
+    }
+
+    div[data-testid="stSidebarCollapsedControl"] svg,
+    div[data-testid="collapsedControl"] svg,
+    section[data-testid="stSidebar"] button[kind="header"] svg,
+    section[data-testid="stSidebar"] button[kind="headerNoPadding"] svg,
+    button[data-testid="stBaseButton-header"] svg,
+    button[data-testid="baseButton-header"] svg {
+        color: #FFFFFF !important;
+        fill: #FFFFFF !important;
+    }
+
     .metric-card {
         padding: 1rem;
         border-radius: 10px;
@@ -272,7 +341,7 @@ st.markdown("""
 
 # Initialize session state
 if 'data_mode' not in st.session_state:
-    st.session_state.data_mode = 'api'  # 'api' or 'mock'
+    st.session_state.data_mode = 'api'  # 'api'(MQTT/local DB) or 'mock'
 
 if 'simulation_running' not in st.session_state:
     st.session_state.simulation_running = False
@@ -307,13 +376,6 @@ if 'api_connected' not in st.session_state:
 if 'last_db_check' not in st.session_state:
     st.session_state.last_db_check = 0
 
-if 'last_api_poll' not in st.session_state:
-    st.session_state.last_api_poll = 0
-
-if 'api_catchup_done' not in st.session_state:
-    st.session_state.api_catchup_done = False
-
-
 # Sidebar controls
 with st.sidebar:
     st.header("⚙️ Controls")
@@ -323,7 +385,7 @@ with st.sidebar:
     data_mode = st.radio(
         "Select Data Mode",
         options=['api', 'mock'],
-        format_func=lambda x: "API (Real Sensors)" if x == 'api' else "Mock (Simulation)",
+        format_func=lambda x: "MQTT (Real Sensors via Pi)" if x == 'api' else "Mock (Simulation)",
         index=0 if st.session_state.data_mode == 'api' else 1
     )
     
@@ -334,48 +396,20 @@ with st.sidebar:
         ])
         st.rerun()
     
-    # API Connection Status & Background Service Info
+    # MQTT (local DB) Status
     if st.session_state.data_mode == 'api':
-        api_client = get_api_client()
-        
-        # Show connection status based on bookmark AND database readings
-        bookmark = api_client.get_bookmark_info()
         db = get_db_manager()
         reading_count = db.get_reading_count()
-        
-        if bookmark.get("last_id", 0) > 0:
+
+        st.info("📶 Real mode is local MQTT: ESP32 → Pi Mosquitto → mqtt_subscriber.py → SQLite")
+
+        if reading_count > 0:
             st.success("✅ Sensor Data Active")
-            st.caption(f"Last reading ID: {bookmark['last_id']}")
-        elif reading_count > 0:
-            st.success("✅ Sensor Data Active")
-            st.caption(f"Database has {reading_count} readings. Bookmark will update on next poll.")
+            st.caption(f"Database has {reading_count} readings.")
         else:
             st.warning("⚠️ No data yet")
-            st.caption("Start the background client to fetch data.")
-        
-        # Test connection button
-        if st.button("🔄 Test API Connection"):
-            raw = api_client.fetch_current()
-            if raw is not None:
-                st.session_state.api_connected = True
-                st.success("Connection successful!")
-                # Unwrap server response envelope
-                readings = raw.get("readings", [])
-                if readings:
-                    r = readings[0]
-                    st.json({
-                        "id": r.get("id"),
-                        "temperature": r.get("temperature"),
-                        "humidity": r.get("humidity"),
-                        "mq135_co2": r.get("mq135_co2"),
-                        "mq136_h2s": r.get("mq136_h2s"),
-                        "mq137_nh3": r.get("mq137_nh3"),
-                        "quality_level": r.get("quality_level"),
-                    })
-                else:
-                    st.warning("API reachable but no readings found on server.")
-            else:
-                st.error(f"Connection failed: {api_client.last_error}")
+            st.caption("Start the local MQTT subscriber service on Pi to ingest ESP32 data into SQLite.")
+            st.code("python3 mqtt_subscriber.py", language="bash")
     
     st.divider()
     
@@ -411,10 +445,12 @@ with st.sidebar:
         humidity = 60
     
     st.divider()
-    
-    # Reset button (only for mock mode)
+
+    # ── Unified Data Management (sidebar) ──
+    st.subheader("🧹 Data Management")
+
     if st.session_state.data_mode == 'mock':
-        if st.button("🔄 Reset Data"):
+        if st.button("🔄 Reset Simulation", key="sidebar_reset_mock"):
             reset_simulation()
             st.session_state.history = pd.DataFrame(columns=[
                 'timestamp', 'h2s_ppm', 'nh3_ppm', 'voc_ppm', 'temp_c', 'humidity', 'quality_level'
@@ -422,8 +458,28 @@ with st.sidebar:
             st.session_state.visual_prediction = None
             st.session_state.uploaded_image = None
             st.session_state.uploaded_image_bytes = None
-            st.success("Data reset!")
-    
+            st.success("Simulation reset!")
+    else:
+        db = get_db_manager()
+        reading_count = db.get_reading_count()
+        if reading_count > 0:
+            st.warning(f"⚠️ {reading_count} readings in database")
+            confirm_sidebar = st.checkbox("Confirm deletion", key="sidebar_confirm_delete")
+            if st.button("🗑️ Delete All Sensor Data", type="secondary", key="sidebar_delete_all", disabled=not confirm_sidebar):
+                result = db.delete_all_data()
+                if 'error' in result:
+                    st.error(f"Error: {result['error']}")
+                else:
+                    st.success(f"✅ Deleted {result['sensor_readings']} sensor readings, "
+                              f"{result['visual_predictions']} visual predictions, "
+                              f"{result['fusion_decisions']} fusion decisions")
+                    st.session_state.history = pd.DataFrame(columns=[
+                        'timestamp', 'h2s_ppm', 'nh3_ppm', 'voc_ppm', 'temp_c', 'humidity', 'quality_level'
+                    ])
+                    st.rerun()
+        else:
+            st.info("No data to delete.")
+
     st.divider()
     
     # Display elapsed time (only for mock mode)
@@ -489,24 +545,6 @@ with st.sidebar:
                 mime="text/csv",
                 width='stretch'
             )
-            
-            # Delete all data button (only for API mode)
-            if st.session_state.data_mode == 'api':
-                if st.button("🗑️ Delete All Data", type="secondary"):
-                    db = get_db_manager()
-                    result = db.delete_all_data()
-                    
-                    if 'error' in result:
-                        st.error(f"Error deleting data: {result['error']}")
-                    else:
-                        st.success(f"✅ Deleted {result['sensor_readings']} sensor readings, "
-                                  f"{result['visual_predictions']} visual predictions, "
-                                  f"{result['fusion_decisions']} fusion decisions")
-                        # Clear session state history
-                        st.session_state.history = pd.DataFrame(columns=[
-                            'timestamp', 'h2s_ppm', 'nh3_ppm', 'voc_ppm', 'temp_c', 'humidity', 'quality_level'
-                        ])
-                        st.rerun()
     
     # Thresholds info
     st.subheader("📊 Gas Thresholds")
@@ -648,6 +686,89 @@ def get_sync_state_summary() -> dict:
     }
 
 
+def _list_deletable_image_files() -> list[Path]:
+    """Return persisted image files that are safe to delete from the dashboard."""
+    image_files: list[Path] = []
+
+    for image_dir in PERSISTED_IMAGE_DIRS:
+        if not image_dir.exists():
+            continue
+        image_files.extend(
+            file_path for file_path in image_dir.iterdir()
+            if file_path.is_file()
+            and (image_dir != LOCAL_IMAGES_DIR or file_path.suffix.lower() in {'.jpg', '.jpeg', '.png', '.webp'})
+            and file_path.name != 'dummyImg.png'
+        )
+
+    return image_files
+
+
+def get_persisted_image_summary() -> dict:
+    """Collect counts for persisted image files and sync ledger image rows."""
+    image_files = _list_deletable_image_files()
+    pending_count = sum(1 for file_path in image_files if file_path.parent == PENDING_SYNC_DIR)
+    local_count = sum(1 for file_path in image_files if file_path.parent == LOCAL_IMAGES_DIR)
+    total_bytes = sum(file_path.stat().st_size for file_path in image_files if file_path.exists())
+    ledger_count = 0
+    ledger_status_counts = {}
+
+    for ledger_path in IMAGE_LEDGER_PATHS:
+        if not ledger_path.exists():
+            continue
+        try:
+            with sqlite3.connect(ledger_path) as connection:
+                cursor = connection.cursor()
+                ledger_count += cursor.execute("SELECT COUNT(*) FROM images").fetchone()[0]
+                for status, count in cursor.execute(
+                    "SELECT status, COUNT(*) FROM images GROUP BY status ORDER BY status"
+                ).fetchall():
+                    ledger_status_counts[status] = ledger_status_counts.get(status, 0) + count
+        except sqlite3.Error:
+            continue
+
+    return {
+        'file_count': len(image_files),
+        'pending_files': pending_count,
+        'local_files': local_count,
+        'bytes': total_bytes,
+        'ledger_count': ledger_count,
+        'ledger_status_counts': ledger_status_counts,
+    }
+
+
+def delete_persisted_images() -> dict:
+    """Delete persisted image files and clear the sync image ledger."""
+    image_files = _list_deletable_image_files()
+    deleted_files = 0
+    failed_files = []
+    ledger_deleted = 0
+
+    for file_path in image_files:
+        try:
+            file_path.unlink()
+            deleted_files += 1
+        except OSError as error:
+            failed_files.append(f"{file_path}: {error}")
+
+    for ledger_path in IMAGE_LEDGER_PATHS:
+        if not ledger_path.exists():
+            continue
+        try:
+            with sqlite3.connect(ledger_path) as connection:
+                cursor = connection.cursor()
+                cursor.execute("DELETE FROM images")
+                ledger_deleted += cursor.rowcount
+                connection.commit()
+        except sqlite3.Error as error:
+            failed_files.append(f"{ledger_path}: {error}")
+
+    return {
+        'deleted_files': deleted_files,
+        'ledger_deleted': ledger_deleted,
+        'failed_files': failed_files,
+    }
+
+
 def load_latest_pending_capture() -> tuple[bool, str]:
     """Load the most recent pending image into the dashboard preview pane."""
     summary = get_sync_state_summary()
@@ -713,29 +834,10 @@ if st.session_state.data_mode == 'mock' and st.session_state.simulation_running:
         st.rerun()
 
 elif st.session_state.data_mode == 'api':
-    # Poll remote API for new data and load from local database
+    # Local MQTT mode: load from local database (no remote API polling)
     current_time = time.time()
-    
+
     if current_time - st.session_state.last_db_check >= config.CHART_REFRESH_INTERVAL:
-        # Poll the remote API and store new readings in local DB
-        if current_time - st.session_state.last_api_poll >= config.SENSOR_API_POLL_INTERVAL:
-            try:
-                bookmark = load_bookmark()
-                
-                # Run catch-up on first load to recover missed readings
-                if not st.session_state.api_catchup_done:
-                    logger.info("Running API catch-up for missed readings...")
-                    bookmark = catch_up(bookmark)
-                    st.session_state.api_catchup_done = True
-                
-                new_bookmark = poll_current(bookmark)
-                if new_bookmark != bookmark:
-                    logger.debug("New reading stored from API poll")
-            except Exception as e:
-                logger.warning(f"API poll failed: {e}")
-            
-            st.session_state.last_api_poll = current_time
-        
         # Load data from local database
         db = get_db_manager()
         recent_readings = db.get_recent_readings(limit=config.HISTORY_DISPLAY_COUNT)
@@ -1258,15 +1360,89 @@ with col_right:
     """, unsafe_allow_html=True)
 
 
+# ── Bottom Data Management Section ──
+st.divider()
+st.subheader("🧹 Data Management")
+
+image_summary = get_persisted_image_summary()
+
+if st.session_state.data_mode == 'mock':
+    col_mock_a, col_mock_b, col_mock_c = st.columns(3)
+    with col_mock_a:
+        if st.button("🔄 Reset Simulation", key="bottom_reset_mock"):
+            reset_simulation()
+            st.session_state.history = pd.DataFrame(columns=[
+                'timestamp', 'h2s_ppm', 'nh3_ppm', 'voc_ppm', 'temp_c', 'humidity', 'quality_level'
+            ])
+            st.session_state.visual_prediction = None
+            st.session_state.uploaded_image = None
+            st.session_state.uploaded_image_bytes = None
+            st.success("Simulation reset!")
+    with col_mock_b:
+        st.metric("🖼️ Stored Images", image_summary['file_count'])
+        st.caption(f"Files: {format_bytes(image_summary['bytes'])}; ledger rows: {image_summary['ledger_count']}")
+    with col_mock_c:
+        confirm_images = st.checkbox("⚠️ Confirm image delete", key="bottom_confirm_images_mock")
+        if st.button("🗑️ Delete All Images", type="secondary", key="bottom_delete_images_mock", disabled=not confirm_images):
+            result = delete_persisted_images()
+            st.session_state.uploaded_image = None
+            st.session_state.uploaded_image_bytes = None
+            st.session_state.visual_prediction = None
+            if result['failed_files']:
+                st.warning(f"Deleted {result['deleted_files']} image files and {result['ledger_deleted']} ledger rows, but {len(result['failed_files'])} item(s) failed.")
+            else:
+                st.success(f"✅ Deleted {result['deleted_files']} image files and {result['ledger_deleted']} ledger rows")
+            st.rerun()
+else:
+    db = get_db_manager()
+    reading_count = db.get_reading_count()
+
+    col_api_a, col_api_b, col_api_c, col_api_d = st.columns(4)
+    with col_api_a:
+        st.metric("📊 DB Readings", reading_count)
+    with col_api_b:
+        st.metric("🖼️ Stored Images", image_summary['file_count'])
+        st.caption(f"Files: {format_bytes(image_summary['bytes'])}; ledger rows: {image_summary['ledger_count']}")
+    with col_api_c:
+        if reading_count > 0:
+            confirm_bottom = st.checkbox("⚠️ Confirm data delete", key="bottom_confirm_delete")
+            if st.button("🗑️ Delete All Sensor Data", type="secondary", key="bottom_delete_all", disabled=not confirm_bottom):
+                result = db.delete_all_data()
+                if 'error' in result:
+                    st.error(f"Error: {result['error']}")
+                else:
+                    st.success(f"✅ Deleted {result['sensor_readings']} sensor readings, "
+                              f"{result['visual_predictions']} visual predictions, "
+                              f"{result['fusion_decisions']} fusion decisions")
+                    st.session_state.history = pd.DataFrame(columns=[
+                        'timestamp', 'h2s_ppm', 'nh3_ppm', 'voc_ppm', 'temp_c', 'humidity', 'quality_level'
+                    ])
+                    st.rerun()
+        else:
+            st.info("No sensor data to delete.")
+    with col_api_d:
+        confirm_images = st.checkbox("⚠️ Confirm image delete", key="bottom_confirm_images_api")
+        if st.button("🗑️ Delete All Images", type="secondary", key="bottom_delete_images_api", disabled=not confirm_images):
+            result = delete_persisted_images()
+            st.session_state.uploaded_image = None
+            st.session_state.uploaded_image_bytes = None
+            st.session_state.visual_prediction = None
+            if result['failed_files']:
+                st.warning(f"Deleted {result['deleted_files']} image files and {result['ledger_deleted']} ledger rows, but {len(result['failed_files'])} item(s) failed.")
+            else:
+                st.success(f"✅ Deleted {result['deleted_files']} image files and {result['ledger_deleted']} ledger rows")
+            st.rerun()
+
+
 # Footer
 st.divider()
 st.markdown(f"""
 <div style='text-align: center; color: #666;'>
     <p>🥩 Multi-Modal Meat Quality Monitoring System | Computer Vision + Gas Sensors</p>
     <p>Sensors: MQ136 (H2S), MQ137 (NH3), MQ135 (VOC), AHT10 (Temp/Humidity)</p>
-    <p>Data Mode: <strong>{'API (Real Sensors)' if st.session_state.data_mode == 'api' else 'Mock (Simulation)'}</strong></p>
+    <p>Data Mode: <strong>{'MQTT (Real Sensors via Pi)' if st.session_state.data_mode == 'api' else 'Mock (Simulation)'}</strong></p>
     <p style='margin-top: 20px;'>
-        © 2025 Tahfizul Hasan Zihan. All Rights Reserved.<br/>
+        © 2026 Tahfizul Hasan Zihan. All Rights Reserved.<br/>
         <a href='https://github.com/ThZihan/meat_quality/tree/master' target='_blank' style='color: #666; text-decoration: none;'>
             🔗 GitHub: https://github.com/ThZihan/meat_quality/tree/master
         </a>

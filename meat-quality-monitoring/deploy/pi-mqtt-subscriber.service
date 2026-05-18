@@ -1,0 +1,17 @@
+[Unit]
+Description=Meat Quality MQTT Subscriber (Local Pi Ingestion)
+After=network-online.target mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zihan
+WorkingDirectory=/home/zihan/projects/meat-quality-monitoring
+ExecStart=/home/zihan/projects/meat-quality-monitoring/venv/bin/python3 /home/zihan/projects/meat-quality-monitoring/mqtt_subscriber.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+

@@ -4,9 +4,10 @@ After=local-fs.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/pi/meat-quality-monitoring
-ExecStartPre=/bin/mkdir -p /home/pi/pending_sync
-ExecStart=/usr/bin/python3 /home/pi/meat-quality-monitoring/capture.py
+User=zihan
+WorkingDirectory=/home/zihan/projects/meat-quality-monitoring
+ExecStartPre=/bin/mkdir -p /home/zihan/pending_sync
+ExecStart=/home/zihan/projects/meat-quality-monitoring/venv/bin/python3 /home/zihan/projects/meat-quality-monitoring/capture.py
 Restart=always
 RestartSec=5
 StandardOutput=journal

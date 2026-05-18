@@ -11,8 +11,9 @@ This guide covers the complete deployment of the ESP32 + Raspberry Pi meat quali
 3. [ESP32 Setup](#esp32-setup)
 4. [MQTT Broker Configuration](#mqtt-broker-configuration)
 5. [Dashboard Deployment](#dashboard-deployment)
-6. [Testing](#testing)
-7. [Troubleshooting](#troubleshooting)
+6. [Local MQTT Subscriber Service](#local-mqtt-subscriber-service)
+7. [Testing](#testing)
+8. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -240,6 +241,45 @@ streamlit run app.py --server.address 0.0.0.0 --server.port 8501
 ```
 
 Access from any device on network: `http://<RASPBERRY_PI_IP>:8501`
+
+## Local MQTT Subscriber Service
+
+Use the standalone subscriber so Streamlit reruns never interrupt ingestion.
+
+### 1. Install service file
+
+```bash
+cd /home/pi/meat-quality-monitoring
+sudo cp deploy/pi-mqtt-subscriber.service /etc/systemd/system/
+sudo systemctl daemon-reload
+```
+
+### 2. Enable and start
+
+```bash
+sudo systemctl enable pi-mqtt-subscriber.service
+sudo systemctl start pi-mqtt-subscriber.service
+sudo systemctl status pi-mqtt-subscriber.service
+```
+
+### 3. View logs
+
+```bash
+journalctl -u pi-mqtt-subscriber.service -f
+```
+
+### 4. Disable old remote API polling client
+
+If previously enabled, disable the old polling approach:
+
+```bash
+sudo systemctl disable meat-monitor-client.service
+sudo systemctl stop meat-monitor-client.service
+```
+
+For complete offline deployment (Pi hotspot + local MQTT), follow:
+
+`HOTSPOT_MQTT_SETUP.md`
 
 ### 5. Run as Service (Auto-start)
 
