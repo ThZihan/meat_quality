@@ -1,0 +1,14 @@
+[Unit]
+Description=Meat Monitor Image Sync (Pi -> Upload Server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=zihan
+WorkingDirectory=/home/zihan/projects/meat-quality-monitoring
+EnvironmentFile=/home/zihan/projects/meat-quality-monitoring/.env
+ExecStart=/home/zihan/projects/meat-quality-monitoring/venv/bin/python3 /home/zihan/projects/meat-quality-monitoring/sync.py --threshold-bytes 1
+StandardOutput=journal
+StandardError=journal
+

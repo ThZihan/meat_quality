@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Meat Monitor Image Sync every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+Unit=pi-image-sync.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

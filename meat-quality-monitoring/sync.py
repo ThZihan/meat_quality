@@ -34,6 +34,8 @@ DEFAULT_UPLOAD_URL = os.getenv(
 DEFAULT_API_KEY = os.getenv("UPLOAD_API_KEY", "")
 DEFAULT_TIMEOUT_SECONDS = int(os.getenv("SYNC_REQUEST_TIMEOUT_SECONDS", "60"))
 DEFAULT_THROTTLE_SECONDS = float(os.getenv("UPLOAD_THROTTLE_SECONDS", "1.5"))
+DEFAULT_UPLOAD_RETRIES = int(os.getenv("UPLOAD_RETRIES", "3"))
+DEFAULT_UPLOAD_RETRY_DELAY_SECONDS = float(os.getenv("UPLOAD_RETRY_DELAY_SECONDS", "5"))
 
 
 logger = logging.getLogger("sync")
@@ -75,7 +77,7 @@ def ensure_runtime_ready(db_path: Path, pending_dir: Path) -> None:
 def calculate_total_directory_size(pending_dir: Path) -> int:
     total_bytes = 0
     for item in pending_dir.iterdir():
-        if item.is_file():
+        if item.is_file() and not item.name.startswith("."):
             total_bytes += item.stat().st_size
     return total_bytes
 
@@ -88,6 +90,7 @@ def fetch_pending_rows(db_path: Path) -> list[sqlite3.Row]:
             SELECT id, filename, filepath, capture_time, upload_time, status
             FROM images
             WHERE status = 'pending'
+              AND filename NOT LIKE '.%'
             ORDER BY capture_time ASC, id ASC
             """
         )
@@ -124,6 +127,8 @@ def upload_single_image(
     api_key: str,
     timeout_seconds: int,
     throttle_seconds: float,
+    upload_retries: int,
+    retry_delay_seconds: float,
 ) -> bool:
     file_path = Path(row["filepath"])
 
@@ -138,25 +143,48 @@ def upload_single_image(
 
     headers = {"x-api-key": api_key}
 
-    try:
-        with file_path.open("rb") as file_handle:
-            response = requests.post(
-                upload_url,
-                headers=headers,
-                files={"image": (row["filename"], file_handle, "image/jpeg")},
-                timeout=(10, timeout_seconds),
+    response = None
+    for attempt in range(1, upload_retries + 1):
+        try:
+            with file_path.open("rb") as file_handle:
+                response = requests.post(
+                    upload_url,
+                    headers=headers,
+                    files={"image": (row["filename"], file_handle, "image/jpeg")},
+                    timeout=(10, timeout_seconds),
+                )
+        except requests.exceptions.RequestException as error:
+            logger.warning(
+                "Upload request failed for %s (attempt %d/%d): %s",
+                file_path,
+                attempt,
+                upload_retries,
+                error,
             )
-    except requests.exceptions.RequestException as error:
-        logger.error("Upload request failed for %s: %s", file_path, error)
-        return False
+            response = None
+        else:
+            if response.status_code in (200, 201):
+                break
 
-    if response.status_code != 200:
-        logger.error(
-            "Upload failed for %s with status %s and body: %s",
-            file_path,
-            response.status_code,
-            response.text[:500],
-        )
+            logger.warning(
+                "Upload failed for %s with status %s (attempt %d/%d) and body: %s",
+                file_path,
+                response.status_code,
+                attempt,
+                upload_retries,
+                response.text[:500],
+            )
+
+            # Retry transient server-side failures; do not retry deterministic
+            # client-side failures such as 400/401/404.
+            if response.status_code < 500:
+                return False
+
+        if attempt < upload_retries:
+            time.sleep(retry_delay_seconds * attempt)
+
+    if response is None or response.status_code not in (200, 201):
+        logger.error("Upload failed permanently for %s", file_path)
         return False
 
     mark_uploaded(db_path, row["id"])
@@ -180,6 +208,8 @@ def run_sync(
     api_key: str,
     timeout_seconds: int,
     throttle_seconds: float,
+    upload_retries: int,
+    retry_delay_seconds: float,
 ) -> int:
     ensure_runtime_ready(db_path, pending_dir)
 
@@ -209,9 +239,15 @@ def run_sync(
             api_key=api_key,
             timeout_seconds=timeout_seconds,
             throttle_seconds=throttle_seconds,
+            upload_retries=upload_retries,
+            retry_delay_seconds=retry_delay_seconds,
         )
         if not success:
-            logger.error("Stopping sync loop to allow a future cron run to resume safely.")
+            logger.error(
+                "Upload failed for row id=%s; leaving it pending and stopping "
+                "this cycle so a future timer run can retry safely.",
+                row["id"],
+            )
             return 1
 
     logger.info("Sync cycle completed successfully.")
@@ -251,6 +287,18 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_THROTTLE_SECONDS,
         help="Delay after every successful upload",
     )
+    parser.add_argument(
+        "--upload-retries",
+        type=int,
+        default=DEFAULT_UPLOAD_RETRIES,
+        help="Number of upload attempts per image before leaving it pending",
+    )
+    parser.add_argument(
+        "--retry-delay-seconds",
+        type=float,
+        default=DEFAULT_UPLOAD_RETRY_DELAY_SECONDS,
+        help="Base backoff delay between transient upload retries",
+    )
     return parser.parse_args()
 
 
@@ -265,6 +313,8 @@ def main() -> int:
         api_key=args.api_key,
         timeout_seconds=args.timeout_seconds,
         throttle_seconds=args.throttle_seconds,
+        upload_retries=args.upload_retries,
+        retry_delay_seconds=args.retry_delay_seconds,
     )
 
 
