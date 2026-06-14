@@ -175,6 +175,7 @@ def catch_up(bookmark: Dict[str, Any]) -> Dict[str, Any]:
     logger.info("Catching up from bookmark: id=%s, ts=%s", bookmark.get("last_id"), last_ts)
 
     params = {
+        "device_id": config.SENSOR_API_DEVICE_ID,
         "from": last_ts,
         "limit": config.SENSOR_API_HISTORY_LIMIT,
     }
@@ -224,7 +225,7 @@ def poll_current(bookmark: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         Updated bookmark dict
     """
-    data = api_get("/current")
+    data = api_get("/current", params={"device_id": config.SENSOR_API_DEVICE_ID})
     if data is None:
         return bookmark
 
@@ -268,6 +269,7 @@ class SensorAPIClient:
             resp = requests.get(
                 f"{config.SENSOR_API_BASE}/current",
                 headers=headers,
+                params={"device_id": config.SENSOR_API_DEVICE_ID},
                 timeout=config.SENSOR_API_TIMEOUT,
             )
             if resp.status_code == 200:

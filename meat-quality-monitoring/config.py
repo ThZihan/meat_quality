@@ -29,6 +29,9 @@ SENSOR_API_BASE = os.environ.get(
 SENSOR_API_KEY = os.environ.get("SENSOR_API_KEY", "")
 SENSOR_API_TIMEOUT = int(os.environ.get("SENSOR_API_TIMEOUT", "10"))  # seconds
 
+# Device identifier used as a query parameter for /current, /latest, /history
+SENSOR_API_DEVICE_ID = os.environ.get("SENSOR_API_DEVICE_ID", "ESP32-MeatMonitor")
+
 # Polling & Recovery Settings
 SENSOR_API_POLL_INTERVAL = int(os.environ.get("SENSOR_API_POLL_INTERVAL", "5"))  # seconds between /current polls
 SENSOR_API_MAX_RETRIES = int(os.environ.get("SENSOR_API_MAX_RETRIES", "3"))  # retries per request
@@ -37,9 +40,8 @@ SENSOR_API_HISTORY_LIMIT = int(os.environ.get("SENSOR_API_HISTORY_LIMIT", "5000"
 SENSOR_API_CATCHUP_FAILURE_THRESHOLD = int(os.environ.get("SENSOR_API_CATCHUP_FAILURE_THRESHOLD", "5"))  # consecutive failures before re-catch-up
 
 # Bookmark file — tracks last seen reading ID for recovery
-BOOKMARK_FILE = os.environ.get(
-    "BOOKMARK_FILE",
-    os.path.expanduser("~/.meat_monitor_bookmark.json")
+BOOKMARK_FILE = os.path.expanduser(
+    os.environ.get("BOOKMARK_FILE", "~/.meat_monitor_bookmark.json")
 )
 
 # ============================================================================
