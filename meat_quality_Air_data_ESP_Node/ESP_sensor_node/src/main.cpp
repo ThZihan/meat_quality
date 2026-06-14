@@ -59,7 +59,7 @@
 
 // HTTP API
 const char* API_URL   = "https://meat-monitor.kalobiral.com.bd/api/meat-data";
-const char* API_KEY   = "aa8a531a309e574c7fef976850416e7613984ba03f4cf370";  // Sensor API key
+const char* API_KEY   = "385dff0a22e1ea6f0fecaf23f3d26b2a";  // Sensor API key
 const char* DEVICE_ID = "ESP32-MeatMonitor";
 
 // SoftAP Config Portal
@@ -624,8 +624,8 @@ void setup() {
         // No EEPROM credentials — use hardcoded defaults and save them
         Serial.println(F("[BOOT] No saved WiFi credentials."));
         Serial.println(F("[BOOT] Using hardcoded defaults and saving to EEPROM..."));
-        strncpy(wifi_ssid, "Lovly", sizeof(wifi_ssid) - 1);
-        strncpy(wifi_pass, "tweety@pichu", sizeof(wifi_pass) - 1);
+        strncpy(wifi_ssid, "FAB_LAB_IUB_2.4G", sizeof(wifi_ssid) - 1);
+        strncpy(wifi_pass, "fabbersxiub", sizeof(wifi_pass) - 1);
         saveCredentials(wifi_ssid, wifi_pass);
 
         if (connectWiFi(wifi_ssid, wifi_pass)) {
