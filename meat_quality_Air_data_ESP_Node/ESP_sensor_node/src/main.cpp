@@ -59,7 +59,7 @@
 
 // HTTP API
 const char* API_URL   = "https://meat-monitor.kalobiral.com.bd/api/meat-data";
-const char* API_KEY   = "YOUR_API_KEY_HERE";  // Set before flashing
+const char* API_KEY   = "aa8a531a309e574c7fef976850416e7613984ba03f4cf370";  // Sensor API key
 const char* DEVICE_ID = "ESP32-MeatMonitor";
 
 // SoftAP Config Portal
