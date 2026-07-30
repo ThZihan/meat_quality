@@ -459,10 +459,14 @@ with st.sidebar:
                     
                     return output.getvalue()
             
-            csv_data = get_all_readings_csv()
+            # IMPORTANT: Pass the CSV builder as a *callable* (not the pre-built
+            # string). Streamlit only invokes it when the user clicks the button.
+            # Previously this ran on EVERY auto-refresh rerun (every ~1s in API
+            # mode), rebuilding an 11 MB CSV from 100k+ rows each time, which
+            # made the dashboard hang forever on the "Running..." spinner.
             st.download_button(
                 label="📥 Download CSV",
-                data=csv_data,
+                data=get_all_readings_csv,
                 file_name=f"meat_monitor_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv",
                 width='stretch'
