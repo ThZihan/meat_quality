@@ -105,6 +105,7 @@ def normalize_current(data: Dict[str, Any]) -> Dict[str, Any]:
     """
     return {
         "id": int(data.get("id", 0)),
+        "source_id": data.get("source_id", ""),
         "device_id": data.get("device_id", "ESP32-MeatMonitor"),
         "reading_time": data.get("timestamp", ""),
         "temperature": float(data.get("temperature", 0.0)),
@@ -125,6 +126,7 @@ def normalize_history(reading: Dict[str, Any]) -> Dict[str, Any]:
     """
     return {
         "id": int(reading.get("id", 0)),
+        "source_id": reading.get("source_id", ""),
         "device_id": reading.get("device_id", "ESP32-MeatMonitor"),
         "reading_time": reading.get("reading_time", ""),
         "temperature": float(reading.get("temperature", 0.0)),
@@ -138,12 +140,25 @@ def normalize_history(reading: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def store_reading(reading: Dict[str, Any]) -> None:
-    """Store a normalized reading in the local SQLite database."""
+    """Store a normalized reading in the local SQLite database.
+
+    Uses the ORIGINAL reading timestamp from the device (not local Pi time)
+    and passes source_id for deduplication via a UNIQUE constraint.
+    """
     db = get_db_manager()
     try:
+        # Use the original device reading_time, not the Pi's wall clock.
+        reading_time = reading.get("reading_time", "")
+        if reading_time:
+            ts = reading_time.replace("Z", "+00:00")
+            timestamp = datetime.fromisoformat(ts)
+        else:
+            timestamp = datetime.now()
+
         db.insert_sensor_reading({
-            "timestamp": datetime.now(),
+            "timestamp": timestamp,
             "device_id": reading.get("device_id", "ESP32-MeatMonitor"),
+            "source_id": reading.get("source_id", ""),
             "temperature": reading["temperature"],
             "humidity": reading["humidity"],
             "mq135_co2": reading["mq135_co2"],

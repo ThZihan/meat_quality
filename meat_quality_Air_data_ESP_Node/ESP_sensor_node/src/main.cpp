@@ -46,10 +46,13 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <Wire.h>
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
+#include <Adafruit_AHTX0.h>
 #include <time.h>
 #include <EEPROM.h>
 
@@ -57,14 +60,23 @@
 // CONFIGURATION
 // ═══════════════════════════════════════════════════════════════
 
+// Secrets are loaded from secrets.h (NOT committed to git).
+// Copy secrets.h.example to secrets.h and fill in real values before flashing.
+// If the previous API key was committed publicly it MUST be rotated server-side.
+#include "secrets.h"
+
 // HTTP API
 const char* API_URL   = "https://meat-monitor.kalobiral.com.bd/api/meat-data";
-const char* API_KEY   = "385dff0a22e1ea6f0fecaf23f3d26b2a";  // Sensor API key
 const char* DEVICE_ID = "ESP32-MeatMonitor";
 
-// SoftAP Config Portal
+// AHT10 I2C temperature/humidity sensor
+const int I2C_SDA = 21;
+const int I2C_SCL = 22;
+Adafruit_AHTX0 aht;
+bool ahtReady = false;
+
+// SoftAP Config Portal (password from secrets.h)
 const char* AP_SSID     = "ESP32-Setup";
-const char* AP_PASSWORD = "YOUR_AP_PASSWORD_HERE";  // Set before flashing
 
 // Timing
 const unsigned long READ_INTERVAL_MS = 3000;  // 3 seconds
@@ -247,7 +259,16 @@ void drainQueue() {
 
 int httpPostJson(const char* jsonPayload) {
     HTTPClient http;
-    http.begin(API_URL);
+    // Use WiFiClientSecure with a root CA to validate the TLS certificate.
+    // The previous URL-only overload silently called setInsecure() (no cert
+    // validation), leaving the connection vulnerable to MITM attacks.
+    static WiFiClientSecure secureClient;
+    static bool caConfigured = false;
+    if (!caConfigured) {
+        secureClient.setCACert(CLOUDFLARE_ROOT_CA);
+        caConfigured = true;
+    }
+    http.begin(secureClient, API_URL);
     http.addHeader("Content-Type", "application/json");
     http.addHeader("X-API-Key", API_KEY);
     http.setTimeout(10000);
@@ -288,8 +309,16 @@ void buildSensorJson(char* buf, float mq135_vocPPM, float mq135_nh3PPM,
 
     // Sensors
     JsonObject sensors = doc.createNestedObject("sensors");
-    sensors["temperature"] = 25.0;   // TODO: real sensor
-    sensors["humidity"]    = 60.0;   // TODO: real sensor
+    // Read real temperature/humidity from AHT10 if available, else fallback.
+    if (ahtReady) {
+        sensors_event_t humEvent, tempEvent;
+        aht.getEvent(&humEvent, &tempEvent);
+        sensors["temperature"] = (float)tempEvent.temperature;
+        sensors["humidity"]    = (float)humEvent.relative_humidity;
+    } else {
+        sensors["temperature"] = 25.0;
+        sensors["humidity"]    = 60.0;
+    }
     sensors["mq135_co2"]   = mq135_vocPPM;
     sensors["mq136_h2s"]   = mq136_h2sPPM;
     sensors["mq137_nh3"]   = mq137_nh3PPM;
@@ -595,6 +624,16 @@ void setup() {
     analogReadResolution(12);
     analogSetAttenuation(ADC_11db);
 
+    // AHT10 temperature/humidity sensor (I2C on GPIO 21/22)
+    Wire.begin(I2C_SDA, I2C_SCL);
+    if (aht.begin()) {
+        ahtReady = true;
+        Serial.println(F("[AHT10] Temperature/humidity sensor initialized"));
+    } else {
+        ahtReady = false;
+        Serial.println(F("[AHT10] ✗ Not found — using fallback values (25.0C / 60.0%)"));
+    }
+
     // EEPROM
     EEPROM.begin(EEPROM_SIZE);
 
@@ -607,12 +646,21 @@ void setup() {
             // Sync time
             configTime(0, 0, "pool.ntp.org", "time.nist.gov");
             Serial.print(F("[NTP] Waiting for time sync..."));
+            // Bounded NTP sync — max 30 attempts (~15 s) to avoid hanging
+            // indefinitely if NTP servers are unreachable.
+            configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+            Serial.print(F("[NTP] Waiting for time sync..."));
             time_t now = time(nullptr);
-            while (now < 8 * 3600 * 2) {
+            int ntpAttempts = 0;
+            while (now < 1700000000 && ntpAttempts < 30) {
                 delay(500);
                 Serial.print(F("."));
                 now = time(nullptr);
+                ntpAttempts++;
             }
+            if (now < 1700000000) {
+                Serial.println(F("\n[NTP] ✗ Sync FAILED (will retry later). Using epoch fallback."));
+            } else {
             struct tm timeinfo;
             getLocalTime(&timeinfo);
             Serial.printf("\n[NTP] ✓ Synced: %s\n", asctime(&timeinfo));
@@ -624,19 +672,29 @@ void setup() {
         // No EEPROM credentials — use hardcoded defaults and save them
         Serial.println(F("[BOOT] No saved WiFi credentials."));
         Serial.println(F("[BOOT] Using hardcoded defaults and saving to EEPROM..."));
-        strncpy(wifi_ssid, "FAB_LAB_IUB_2.4G", sizeof(wifi_ssid) - 1);
-        strncpy(wifi_pass, "fabbersxiub", sizeof(wifi_pass) - 1);
+        // No hardcoded WiFi credentials — user must type "1" + Enter to
+        // configure via the SoftAP portal. This prevents credential leakage.
+        Serial.println(F("[BOOT] No saved credentials and no hardcoded defaults."));
+        Serial.println(F("[BOOT] Type '1' + Enter in Serial Monitor to configure WiFi."));
+        return;
         saveCredentials(wifi_ssid, wifi_pass);
 
         if (connectWiFi(wifi_ssid, wifi_pass)) {
             configTime(0, 0, "pool.ntp.org", "time.nist.gov");
             Serial.print(F("[NTP] Waiting for time sync..."));
+            // Reuse the bounded NTP logic (max 30 attempts).
+            Serial.print(F("[NTP] Waiting for time sync..."));
             time_t now = time(nullptr);
-            while (now < 8 * 3600 * 2) {
+            int ntpAttempts = 0;
+            while (now < 1700000000 && ntpAttempts < 30) {
                 delay(500);
                 Serial.print(F("."));
                 now = time(nullptr);
+                ntpAttempts++;
             }
+            if (now < 1700000000) {
+                Serial.println(F("\n[NTP] ✗ Sync FAILED (will retry later). Using epoch fallback."));
+            } else {
             struct tm timeinfo;
             getLocalTime(&timeinfo);
             Serial.printf("\n[NTP] ✓ Synced: %s\n", asctime(&timeinfo));
@@ -738,8 +796,8 @@ void loop() {
     const char* qualityLevel;
     if (fresh)         qualityLevel = "EXCELLENT";
     else if (good)     qualityLevel = "GOOD";
-    else if (moderate) qualityLevel = "FAIR";
-    else               qualityLevel = "SPOILED";
+    else if (moderate) qualityLevel = "MODERATE";
+    else               qualityLevel = "CRITICAL";
 
     // ── 4. Print readings ──
     Serial.println(F("════════════════════════════════════════"));

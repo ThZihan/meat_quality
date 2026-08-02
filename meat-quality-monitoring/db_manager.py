@@ -50,11 +50,15 @@ class DatabaseManager:
             cursor = conn.cursor()
             
             # Sensor readings table
+            # source_id: deterministic server-assigned deduplication key.
+            # The UNIQUE constraint prevents duplicate rows from retries or
+            # unstable bookmarks. INSERT OR IGNORE silently skips duplicates.
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS sensor_readings (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                     device_id TEXT NOT NULL,
+                    source_id TEXT,
                     temperature REAL NOT NULL,
                     humidity REAL NOT NULL,
                     mq135_co2 REAL NOT NULL,  -- VOC data from MQ135 sensor
@@ -62,9 +66,17 @@ class DatabaseManager:
                     mq137_nh3 REAL NOT NULL,
                     quality_level TEXT NOT NULL,
                     wifi_rssi INTEGER,
-                    sensor_status TEXT
+                    sensor_status TEXT,
+                    UNIQUE(source_id)
                 )
             ''')
+
+            # Migration: add source_id column to pre-existing databases.
+            try:
+                cursor.execute('SELECT source_id FROM sensor_readings LIMIT 1')
+            except Exception:
+                cursor.execute('ALTER TABLE sensor_readings ADD COLUMN source_id TEXT')
+                cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_sensor_source ON sensor_readings(source_id)')
             
             # Visual predictions table
             cursor.execute('''
@@ -133,13 +145,16 @@ class DatabaseManager:
                 # Serialize sensor status if present
                 sensor_status = json.dumps(data.get('sensor_status', {}))
                 
+                # INSERT OR IGNORE: if source_id already exists (UNIQUE constraint),
+                # the duplicate is silently skipped — no error, no duplicate row.
                 cursor.execute('''
-                    INSERT INTO sensor_readings 
-                    (timestamp, device_id, temperature, humidity, mq135_co2, mq136_h2s, mq137_nh3, quality_level, wifi_rssi, sensor_status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT OR IGNORE INTO sensor_readings
+                    (timestamp, device_id, source_id, temperature, humidity, mq135_co2, mq136_h2s, mq137_nh3, quality_level, wifi_rssi, sensor_status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     timestamp,
                     data['device_id'],
+                    data.get('source_id'),
                     data['temperature'],
                     data['humidity'],
                     data['mq135_co2'],
@@ -152,7 +167,10 @@ class DatabaseManager:
                 
                 conn.commit()
                 row_id = cursor.lastrowid
-                logger.debug(f"Inserted sensor reading with ID: {row_id}")
+                if row_id and cursor.rowcount > 0:
+                    logger.debug(f"Inserted sensor reading with ID: {row_id}")
+                else:
+                    logger.debug(f"Duplicate reading skipped (source_id={data.get('source_id', 'N/A')})")
                 return row_id
                 
         except Exception as e:

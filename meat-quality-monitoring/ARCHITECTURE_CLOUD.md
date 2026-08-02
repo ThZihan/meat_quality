@@ -119,31 +119,52 @@ sudo systemctl stop pi-mqtt-subscriber.service pi-image-capture.service
 # 2. Switch the main checkout to the cloud branch
 cd ~/projects/meat-quality-monitoring
 git stash            # preserve any local tweaks
-git checkout masterV3-cloud
+git checkout masterV3-cloud-prodfix
 git stash pop        # optional
 
-# 3. Install dependencies (requests, python-dotenv, ...)
+# 3. Install dependencies (requests, python-dotenv, gpiozero, ...)
 pip install -r requirements.txt
 
 # 4. Configure API credentials
 cp .env.example .env
-# edit .env: set SENSOR_API_KEY and UPLOAD_API_KEY
+# edit .env: set SENSOR_API_KEY and UPLOAD_API_KEY (use the ROTATED key)
 
-# 5. Enable the cloud-mode services
+# 5. Update systemd unit paths — replace the username/path below with the
+#    actual Pi user and project directory, then copy to /etc/systemd/system/
+#    The committed units use user=zihan and /home/zihan/projects/...
+#    Adjust if the Pi username is different (e.g. "pi").
+sed -i 's|/home/zihan|'"$HOME"'|g' deploy/meat-monitor-client.service \
+    deploy/pi-image-capture.service deploy/pi-image-sync.service
+
 sudo cp deploy/meat-monitor-client.service /etc/systemd/system/
 sudo cp deploy/pi-image-capture.service    /etc/systemd/system/
+sudo cp deploy/pi-image-sync.service       /etc/systemd/system/
+sudo cp deploy/pi-image-sync.timer         /etc/systemd/system/
 sudo systemctl daemon-reload
+
+# 6. Enable ALL three cloud-mode services + the sync timer
 sudo systemctl enable --now meat-monitor-client.service pi-image-capture.service
+sudo systemctl enable --now pi-image-sync.timer
 ```
+
+> **Important:** The server's `/current` endpoint is now optimized (async
+> tail-read, cached) so polling every 5 s is safe. The `meat-monitor-client`
+> service polls `/current`, stores readings in local SQLite with deduplication
+> via `source_id`, and the Streamlit dashboard reads from that local DB.
 
 ## 8. ESP32 re-flash (HTTP API firmware)
 
 ```bash
 cd meat_quality_Air_data_ESP_Node/ESP_sensor_node
-# edit src/main.cpp: set API_KEY (and optionally API_URL)
-# flash:
+
+# Copy secrets template and fill in real values (NOT committed to git)
+cp src/secrets.h.example src/secrets.h
+# edit src/secrets.h: set API_KEY (rotated) and AP_PASSWORD
+
+# Verify the build compiles, then flash:
 pio run -t upload
 ```
 
 After flashing, the ESP connects to the home WiFi (configured via the SoftAP
-portal at `192.168.4.1` on first boot) and POSTs readings to the cloud.
+portal at `192.168.4.1` on first boot — type `1` + Enter in Serial Monitor)
+and POSTs readings to the cloud using TLS certificate validation.

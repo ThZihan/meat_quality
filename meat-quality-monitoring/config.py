@@ -121,13 +121,15 @@ HEATMAP_MIN_READINGS = 10    # Minimum readings needed for correlation heatmap
 # Quality Level Mapping (ESP32 5-level -> Pi 4-level)
 # ============================================================================
 
-# Mapping from ESP32 quality levels to Pi dashboard status
+# Mapping from ESP32 quality levels to Pi dashboard status.
+# NOTE: The ESP32 firmware now sends EXCELLENT/GOOD/MODERATE/POOR/CRITICAL
+# (the previous FAIR/SPOILED values were rejected by the server with HTTP 400).
 QUALITY_LEVEL_MAP = {
     "EXCELLENT": "SAFE",
     "GOOD": "SAFE",
-    "FAIR": "WARNING",
-    "POOR": "WARNING",
-    "SPOILED": "SPOILED"
+    "MODERATE": "WARNING",
+    "POOR": "SPOILED",
+    "CRITICAL": "CRITICAL",
 }
 
 # Quality level colors for dashboard
