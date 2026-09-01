@@ -139,6 +139,20 @@ const float MQ135_VOC_A = 110.47,  MQ135_VOC_B = -2.862;
 const float MQ136_H2S_A = 44.947,  MQ136_H2S_B = -2.648;
 const float MQ137_NH3_A = 102.2,   MQ137_NH3_B = -2.473;
 
+// Temperature correction for MQ heater self-heating.
+//
+// The three MQ elements run their heaters continuously and sit close to the
+// BME280 inside the same enclosure, so the part reads the enclosure rather than
+// the air around the sample. Established against a reference thermometer placed
+// in the box: reference 28.50 C, BME280 33.638 C (mean of 20 consecutive
+// readings, spread 33.58-33.75).
+//
+// This is a single-point correction and is only valid near the ambient it was
+// taken at. Self-heating scales with the heater-to-ambient difference, so this
+// figure must be re-established if the enclosure is run at a materially
+// different temperature.
+const float TEMP_OFFSET_C = -5.14;
+
 Adafruit_BME280 bme;
 bool bmeReady = false;
 
@@ -529,7 +543,7 @@ Reading captureReading() {
     r.mq137 = calculatePPM(calculateRS(v137), MQ137_NH3_A, MQ137_NH3_B, MQ137_R0);
 
     if (bmeReady) {
-        r.temperature = bme.readTemperature();
+        r.temperature = bme.readTemperature() + TEMP_OFFSET_C;
         r.humidity    = bme.readHumidity();
         r.pressure    = bme.readPressure() / 100.0F;
         r.bmeOk       = 1;
