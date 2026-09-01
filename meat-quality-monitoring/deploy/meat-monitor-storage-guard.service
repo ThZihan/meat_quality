@@ -1,0 +1,16 @@
+[Unit]
+Description=Meat Monitor Storage Guard - keeps 5 GiB of the SD card free
+After=local-fs.target
+
+[Service]
+Type=simple
+User=zihan
+WorkingDirectory=/home/zihan/projects/meat-quality-monitoring
+EnvironmentFile=/home/zihan/projects/meat-quality-monitoring/.env
+ExecStart=/home/zihan/projects/meat-quality-monitoring/venv/bin/python3 /home/zihan/projects/meat-quality-monitoring/storage_manager.py
+Restart=always
+RestartSec=60
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

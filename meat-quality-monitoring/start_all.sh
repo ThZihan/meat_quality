@@ -1,10 +1,17 @@
 #!/bin/bash
 # Meat Quality Monitoring System - desktop launcher (systemd-aware)
 #
-# All servers are managed by systemd and start at boot:
+# All servers are managed by systemd and start at boot.
+#
+# Web front-ends (this script waits for these and opens them in Chromium):
 #   meat-monitor-dashboard.service   -> http://localhost:8502 (Streamlit dashboard)
 #   pi-camera-feed.service           -> http://localhost:5000 (camera feed)
 #   meat-monitor-latest-view.service -> http://localhost:8600 (latest view page)
+#
+# Backend services (no web page; started and reported, not waited on):
+#   meat-monitor-ble-receiver.service  ESP32 -> BLE -> SQLite  (the ingest path)
+#   meat-monitor-cloud-uploader.service SQLite -> server backup
+#   meat-monitor-storage-guard.service  keeps 5 GiB of the card free
 #
 # This script only: 1) makes sure the systemd services are up,
 # 2) waits (with hard curl timeouts) until pages answer, 3) opens the pages
@@ -44,7 +51,11 @@ echo "=========================================="
 echo ""
 
 # --- 1. Ensure systemd services are running (start them if stopped) --------
-for svc in meat-monitor-dashboard pi-camera-feed meat-monitor-latest-view; do
+# The BLE receiver leads the list deliberately: without it no readings reach
+# the database at all, so it is the first thing worth noticing is down.
+for svc in meat-monitor-ble-receiver meat-monitor-cloud-uploader \
+           meat-monitor-storage-guard meat-monitor-dashboard \
+           pi-camera-feed meat-monitor-latest-view; do
     if systemctl is-active --quiet "$svc.service" 2>/dev/null; then
         echo "[OK] $svc.service is running"
     else

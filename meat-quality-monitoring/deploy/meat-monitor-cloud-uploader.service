@@ -1,0 +1,17 @@
+[Unit]
+Description=Meat Monitor Cloud Uploader - backs stored readings up to the server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zihan
+WorkingDirectory=/home/zihan/projects/meat-quality-monitoring
+EnvironmentFile=/home/zihan/projects/meat-quality-monitoring/.env
+ExecStart=/home/zihan/projects/meat-quality-monitoring/venv/bin/python3 /home/zihan/projects/meat-quality-monitoring/cloud_uploader.py
+Restart=always
+RestartSec=15
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

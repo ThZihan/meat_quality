@@ -11,9 +11,27 @@ Runs as a systemd service. Implements the full data recovery strategy:
 
 Data flow:
   ESP32 → Remote API → This client → Local SQLite DB → Dashboard reads DB
+
+  ⚠ SUPERSEDED ON THIS BRANCH — do not run alongside ble_receiver.py.
+
+  The ESP32 no longer has WiFi and no longer posts to the server, so polling
+  /history returns nothing new: this service has no work left to do. The flow
+  is now the reverse:
+
+      ESP32 → BLE → ble_receiver.py → Local SQLite DB → cloud_uploader.py → API
+
+  Running both at once actively corrupts the history. Readings ingested over
+  BLE are keyed "ESP32-MeatMonitor:<seq>", while the same readings fetched back
+  from the server are keyed by the server's own id. The UNIQUE index on
+  source_id cannot see that those are the same measurement, so every reading
+  would be stored twice under two different keys.
+
+  The guard in main() enforces that. Kept for reference and for rolling back to
+  the WiFi/HTTP architecture on masterV3-cloud-prodfix.
 """
 
 import logging
+import os
 import signal
 import sys
 import time
@@ -48,6 +66,17 @@ signal.signal(signal.SIGTERM, _signal_handler)
 
 
 def main():
+    # Refuse to start unless someone has deliberately opted in. See the module
+    # docstring: concurrently with ble_receiver.py this duplicates every reading.
+    if os.environ.get("MEAT_MONITOR_ALLOW_POLLING") != "1":
+        logger.error(
+            "This poller is superseded by ble_receiver.py on this branch and "
+            "will duplicate every reading if both run. Set "
+            "MEAT_MONITOR_ALLOW_POLLING=1 to override (only makes sense if the "
+            "ESP32 is running the WiFi firmware from masterV3-cloud-prodfix)."
+        )
+        return 1
+
     logger.info("=" * 50)
     logger.info("Meat Monitor Pi Client Starting")
     logger.info("=" * 50)
@@ -106,4 +135,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)

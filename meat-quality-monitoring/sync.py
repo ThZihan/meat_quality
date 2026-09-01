@@ -6,7 +6,9 @@ Default behavior:
 - Initializes the SQLite ledger if it does not exist.
 - Checks whether /home/pi/pending_sync contains at least 10 MiB of data.
 - Uploads pending images sequentially to the configured endpoint.
-- Marks successfully uploaded images in SQLite and deletes local files.
+- Marks successfully uploaded images in SQLite and moves them to a local
+  archive (they are NOT deleted; storage_manager.py reclaims that archive
+  oldest-first only when free disk space approaches its floor).
 - Stops immediately on network errors, timeouts, or non-200 responses.
 - Sleeps 1.5 seconds after each success to protect the receiving server.
 """
@@ -26,6 +28,9 @@ import requests
 
 DEFAULT_PENDING_DIR = Path(os.getenv("PENDING_SYNC_DIR", "/home/pi/pending_sync"))
 DEFAULT_DB_PATH = Path(os.getenv("SYNC_DB_PATH", "/home/pi/sync_state.db"))
+DEFAULT_ARCHIVE_DIR = Path(
+    os.path.expanduser(os.getenv("IMAGE_ARCHIVE_DIR", "~/image_archive"))
+)
 DEFAULT_THRESHOLD_BYTES = 10 * 1024 * 1024
 DEFAULT_UPLOAD_URL = os.getenv(
     "UPLOAD_URL",
@@ -120,6 +125,35 @@ def mark_missing(db_path: Path, image_id: int) -> None:
         connection.commit()
 
 
+def archive_image(file_path: Path, archive_dir: Path = DEFAULT_ARCHIVE_DIR) -> None:
+    """Move an uploaded image out of the pending directory into the archive.
+
+    Moving rather than copying keeps the pending directory an accurate picture
+    of what still owes an upload, while the Pi keeps its own copy of everything
+    it has sent. A failure here is logged but never fails the upload: the image
+    is already on the server, and a stray file costs disk, not data.
+    """
+    try:
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        destination = archive_dir / file_path.name
+
+        # Never let a name collision silently overwrite an older capture.
+        if destination.exists():
+            stem, suffix = destination.stem, destination.suffix
+            counter = 1
+            while destination.exists():
+                destination = archive_dir / f"{stem}_{counter:02d}{suffix}"
+                counter += 1
+
+        file_path.replace(destination)
+    except OSError as error:
+        logger.error(
+            "Uploaded row for %s but could not archive it: %s", file_path, error
+        )
+    else:
+        logger.info("Uploaded and archived %s -> %s", file_path.name, destination)
+
+
 def upload_single_image(
     db_path: Path,
     row: sqlite3.Row,
@@ -189,12 +223,11 @@ def upload_single_image(
 
     mark_uploaded(db_path, row["id"])
 
-    try:
-        file_path.unlink()
-    except OSError as error:
-        logger.error("Uploaded row id=%s but could not delete %s: %s", row["id"], file_path, error)
-    else:
-        logger.info("Uploaded and deleted %s", file_path)
+    # Keep the Pi's own copy rather than deleting on upload. The archive is the
+    # first thing storage_manager.py reclaims when free space nears its floor,
+    # so images survive locally for as long as there is room for them and the
+    # Pi is never left depending on the server to see its own history.
+    archive_image(file_path)
 
     time.sleep(throttle_seconds)
     return True

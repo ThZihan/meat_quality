@@ -190,3 +190,82 @@ ENABLE_DATA_EXPORT = True  # Enable data export functionality
 # Performance settings
 DB_CONNECTION_POOL_SIZE = 5  # Number of database connections in pool
 MQTT_MESSAGE_QUEUE_SIZE = 100  # Maximum number of MQTT messages to queue
+
+
+# ============================================================================
+# BLE Ingest (ESP32 -> Pi)
+# ============================================================================
+# The ESP32 no longer has WiFi. It is a BLE peripheral and this Pi is the only
+# consumer of its readings, so the Pi -- not the cloud -- is now the point at
+# which a reading becomes durable.
+
+# Advertised name of the sensor node. The receiver matches on the service UUID
+# from ble_protocol.py first and only falls back to this name.
+BLE_DEVICE_NAME = os.environ.get("BLE_DEVICE_NAME", "MeatNode")
+
+# Optional hard MAC pin. Set this once the node's address is known to stop the
+# Pi from ever attaching to a look-alike advertiser.
+BLE_DEVICE_ADDRESS = os.environ.get("BLE_DEVICE_ADDRESS", "").strip()
+
+# device_id recorded against BLE readings. Matches the firmware constant and
+# the existing rows, so history stays continuous across the cutover.
+BLE_DEVICE_ID = os.environ.get("BLE_DEVICE_ID", "ESP32-MeatMonitor")
+
+BLE_SCAN_TIMEOUT = float(os.environ.get("BLE_SCAN_TIMEOUT", "10"))
+BLE_CONNECT_TIMEOUT = float(os.environ.get("BLE_CONNECT_TIMEOUT", "20"))
+
+# Backoff between reconnect attempts, in seconds. At ~10 inches a disconnect
+# means the node rebooted or the link glitched, so retry quickly at first.
+BLE_RECONNECT_MIN_DELAY = float(os.environ.get("BLE_RECONNECT_MIN_DELAY", "2"))
+BLE_RECONNECT_MAX_DELAY = float(os.environ.get("BLE_RECONNECT_MAX_DELAY", "30"))
+
+# Re-push the wall clock to the node this often while connected. The ESP has no
+# RTC and no NTP, so this is the only thing keeping its timestamps honest.
+BLE_TIME_SYNC_INTERVAL = float(os.environ.get("BLE_TIME_SYNC_INTERVAL", "300"))
+
+# Treat the link as dead if no notification arrives in this long. The node sends
+# every 3 s, so silence well past that means the connection is a zombie.
+BLE_IDLE_TIMEOUT = float(os.environ.get("BLE_IDLE_TIMEOUT", "60"))
+
+
+# ============================================================================
+# Cloud Uploader (Pi -> server)
+# ============================================================================
+# Readings are written to SQLite first and queued in pending_sync. The uploader
+# drains that queue independently, so a server outage costs nothing but delay.
+
+CLOUD_UPLOAD_INTERVAL = float(os.environ.get("CLOUD_UPLOAD_INTERVAL", "15"))
+CLOUD_UPLOAD_BATCH = int(os.environ.get("CLOUD_UPLOAD_BATCH", "50"))
+CLOUD_UPLOAD_TIMEOUT = int(os.environ.get("CLOUD_UPLOAD_TIMEOUT", "15"))
+CLOUD_UPLOAD_MAX_RETRIES = int(os.environ.get("CLOUD_UPLOAD_MAX_RETRIES", "3"))
+# Rows that keep failing are parked rather than retried forever; they stay in
+# the table (and in sensor_readings) so nothing is silently discarded.
+CLOUD_UPLOAD_MAX_ATTEMPTS = int(os.environ.get("CLOUD_UPLOAD_MAX_ATTEMPTS", "20"))
+
+
+# ============================================================================
+# Storage Guard
+# ============================================================================
+# The Pi holds the only copy of a reading between capture and upload, so it must
+# never run out of room. The guard keeps a floor of free space by reclaiming the
+# OLDEST already-uploaded data first -- the server keeps the long-term archive.
+
+STORAGE_MIN_FREE_BYTES = int(
+    os.environ.get("STORAGE_MIN_FREE_BYTES", str(5 * 1024 * 1024 * 1024))  # 5 GiB
+)
+# Reclaim past the floor so the guard is not re-triggered on every cycle.
+STORAGE_TARGET_FREE_BYTES = int(
+    os.environ.get("STORAGE_TARGET_FREE_BYTES", str(6 * 1024 * 1024 * 1024))  # 6 GiB
+)
+STORAGE_CHECK_INTERVAL = float(os.environ.get("STORAGE_CHECK_INTERVAL", "300"))
+
+# Uploaded images are moved here instead of being deleted, so the Pi keeps its
+# own copy until space actually runs short.
+IMAGE_ARCHIVE_DIR = os.path.expanduser(
+    os.environ.get("IMAGE_ARCHIVE_DIR", "~/image_archive")
+)
+
+# How many rows to delete per pass when trimming the database.
+STORAGE_DB_PRUNE_BATCH = int(os.environ.get("STORAGE_DB_PRUNE_BATCH", "5000"))
+# Never prune below this many readings, however tight space gets.
+STORAGE_DB_MIN_ROWS = int(os.environ.get("STORAGE_DB_MIN_ROWS", "10000"))

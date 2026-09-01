@@ -60,3 +60,7 @@ python-dateutil>=2.8.2
 #
 # Note: The legacy picamera library is NOT used. This system uses the modern
 # libcamera stack with Camera Module 3 support.
+
+# BLE ingest (ESP32 -> Pi). dbus-fast is pulled in by bleak on Linux and is
+# what talks to BlueZ over D-Bus.
+bleak>=1.0.0

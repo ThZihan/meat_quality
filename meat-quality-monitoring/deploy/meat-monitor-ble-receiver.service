@@ -1,0 +1,19 @@
+[Unit]
+Description=Meat Monitor BLE Ingest - receives readings from the ESP32 over BLE
+# Needs the Bluetooth stack, not the network: this service never talks to the
+# internet. Ingest must keep working through a total network outage.
+After=bluetooth.target
+Requires=bluetooth.service
+
+[Service]
+Type=simple
+User=zihan
+WorkingDirectory=/home/zihan/projects/meat-quality-monitoring
+EnvironmentFile=/home/zihan/projects/meat-quality-monitoring/.env
+ExecStart=/home/zihan/projects/meat-quality-monitoring/venv/bin/python3 /home/zihan/projects/meat-quality-monitoring/ble_receiver.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

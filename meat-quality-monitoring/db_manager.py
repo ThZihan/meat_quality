@@ -109,8 +109,27 @@ class DatabaseManager:
                     fusion_status TEXT
                 )
             ''')
-            
+
+            # Outbound queue: every reading stored locally is listed here until
+            # the cloud uploader confirms the server has it. This is what makes
+            # a server outage cost latency instead of data, so it has to exist
+            # on a fresh install -- not just on databases old enough to have
+            # inherited it from a previous schema.
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS pending_sync (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    local_reading_id INTEGER,
+                    payload_json TEXT NOT NULL,
+                    sync_status TEXT NOT NULL DEFAULT 'pending',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    synced_at DATETIME,
+                    retry_count INTEGER DEFAULT 0,
+                    FOREIGN KEY (local_reading_id) REFERENCES sensor_readings(id)
+                )
+            ''')
+
             # Create indexes for performance
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_pending_sync_status ON pending_sync(sync_status)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_sensor_timestamp ON sensor_readings(timestamp)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_sensor_device ON sensor_readings(device_id)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_sensor_quality ON sensor_readings(quality_level)')
@@ -601,6 +620,139 @@ class DatabaseManager:
                 return cursor.fetchone()[0]
         except Exception as e:
             logger.error(f"Error getting reading count: {e}")
+            return 0
+
+
+    # ------------------------------------------------------------------
+    # Outbound sync queue (Pi -> cloud)
+    #
+    # With the ESP32 on BLE, this Pi is where a reading first becomes durable.
+    # Every stored reading is queued here and uploaded independently, so the
+    # server being unreachable costs latency rather than data.
+    # ------------------------------------------------------------------
+
+    def enqueue_pending_sync(self, local_reading_id: int, payload: Dict) -> int:
+        """Queue one stored reading for upload to the cloud.
+
+        Called in the same breath as insert_sensor_reading(); a reading that is
+        in sensor_readings but not here would never reach the server.
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT INTO pending_sync (local_reading_id, payload_json, sync_status)
+                    VALUES (?, ?, 'pending')
+                    """,
+                    (local_reading_id, json.dumps(payload)),
+                )
+                conn.commit()
+                return cursor.lastrowid
+        except Exception as e:
+            logger.error(f"Error queueing reading {local_reading_id} for sync: {e}")
+            return 0
+
+    def fetch_pending_sync(self, limit: int = 50) -> List[Dict]:
+        """Return the oldest queued rows, oldest first, so history uploads in order."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT id, local_reading_id, payload_json, retry_count
+                    FROM pending_sync
+                    WHERE sync_status = 'pending'
+                    ORDER BY id ASC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Error fetching pending sync rows: {e}")
+            return []
+
+    def mark_sync_uploaded(self, sync_id: int) -> None:
+        """Mark a queued row as delivered to the server."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    """
+                    UPDATE pending_sync
+                    SET sync_status = 'synced', synced_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (sync_id,),
+                )
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Error marking sync row {sync_id} uploaded: {e}")
+
+    def mark_sync_failed(self, sync_id: int, max_attempts: int) -> None:
+        """Count a failed attempt, parking the row once it is clearly stuck.
+
+        A parked row keeps its payload and its sensor_readings row: 'failed'
+        means "stop retrying automatically", never "throw the reading away".
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    """
+                    UPDATE pending_sync
+                    SET retry_count = retry_count + 1,
+                        sync_status = CASE
+                            WHEN retry_count + 1 >= ? THEN 'failed'
+                            ELSE 'pending'
+                        END
+                    WHERE id = ?
+                    """,
+                    (max_attempts, sync_id),
+                )
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Error marking sync row {sync_id} failed: {e}")
+
+    def get_sync_queue_stats(self) -> Dict:
+        """Counts per sync_status, for the dashboard and the storage guard."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT sync_status, COUNT(*) FROM pending_sync GROUP BY sync_status"
+                )
+                stats = {status: count for status, count in cursor.fetchall()}
+                return {
+                    "pending": stats.get("pending", 0),
+                    "synced": stats.get("synced", 0),
+                    "failed": stats.get("failed", 0),
+                }
+        except Exception as e:
+            logger.error(f"Error reading sync queue stats: {e}")
+            return {"pending": 0, "synced": 0, "failed": 0}
+
+    def get_unsynced_reading_floor(self) -> Optional[int]:
+        """Lowest sensor_readings.id that has not yet reached the server.
+
+        The storage guard must never delete at or above this id: those rows
+        exist only on this Pi.
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT MIN(local_reading_id) FROM pending_sync
+                    WHERE sync_status != 'synced' AND local_reading_id IS NOT NULL
+                    """
+                )
+                row = cursor.fetchone()
+                return row[0] if row and row[0] is not None else None
+        except Exception as e:
+            logger.error(f"Error reading unsynced floor: {e}")
+            # Fail closed: pretend everything is unsynced rather than risk
+            # deleting a reading the server has never seen.
             return 0
 
 
