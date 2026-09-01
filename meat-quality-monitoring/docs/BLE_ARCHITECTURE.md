@@ -352,3 +352,70 @@ and loses the gas readings — the primary measurement — to preserve photograp
 For a genuine 72-hour offline run, either keep the uplink available (sensor data
 alone is only 56 MiB, so it is never the problem), raise the image interval from
 30 s, or add storage. Sensor readings alone would last **years** on this card.
+
+## The two pipelines are independent
+
+Gas data and images never touch each other in transport:
+
+| | Gas data | Images |
+|---|---|---|
+| Producer | ESP32 over BLE → `ble_receiver.py` | `capture.py` (30 s) |
+| Queue | `pending_sync` table | `sync_state.db` ledger |
+| Uploader | `meat-monitor-cloud-uploader` (continuous) | `pi-image-sync.timer` (every 1 min) |
+| Endpoint | `…/api/meat-data` | `…/api/upload-image` |
+
+Separate processes, queues, endpoints and retry logic. One being blocked,
+throttled or offline has no effect on the other.
+
+The single shared resource is the SD card, so images are given a hard budget
+(`IMAGE_BUDGET_BYTES`, 4 GiB) that `storage_manager.py` enforces on **every**
+pass, independent of the free-space floor. Images self-limit long before the
+disk is threatened, which is what makes the independence real rather than
+nominal: gas data always has room no matter how long the image uplink is down.
+Uploaded copies are trimmed first; un-uploaded images are only shed once the
+budget alone cannot be met.
+
+Measured: with a 50 MiB test budget against 220 MiB of images, the guard
+reclaimed 171 MiB from the uploaded archive and left every un-uploaded image
+untouched.
+
+## Recovery behaviour
+
+**Server unreachable, then returns.** The uploader retries continuously and
+never parks a row for a network error. Measured: the uploader was stopped for
+90 s while ingest continued, building a 34-reading backlog; on restart it
+drained to zero in 45 seconds with nothing parked and nothing lost. Uploads stay
+throttled (`CLOUD_UPLOAD_THROTTLE`) and treat HTTP 429 as retryable, so the
+backfill respects the server's rate limit rather than hammering it.
+
+**Power cut.** Everything already committed to SQLite survives, and the node
+holds its own copy of anything not yet acknowledged. Every service is enabled at
+boot, so the Pi resumes unattended:
+
+```
+meat-monitor-ble-receiver     meat-monitor-dashboard     pi-image-capture
+meat-monitor-cloud-uploader   meat-monitor-latest-view   pi-image-sync.timer
+meat-monitor-storage-guard    pi-camera-feed             bluetooth
+```
+
+Bluetooth survives too: the rfkill unblock is persisted by `systemd-rfkill` and
+`AutoEnable=true` is set in `/etc/bluetooth/main.conf`. Readings captured during
+the outage itself are genuinely gone — nothing was powered to record them.
+
+## The display comes up on its own
+
+`deploy/meat-monitor-display.sh`, installed to `~/.config/autostart/`, opens both
+pages at login with no manual step:
+
+* `http://localhost:8600` — Latest View
+* `http://localhost:8502` — Dashboard
+
+It runs via `lxsession-xdg-autostart`, which the labwc session starts (see
+`/etc/xdg/labwc/autostart`). It waits for each server to answer before opening
+the browser, because a connection-error page after a boot is worse than a few
+seconds' delay. A dedicated Chromium profile keeps the window independent of
+any other browsing and lets the script detect its own window, so re-running it
+never stacks duplicates. Logs to `~/.meat-monitor-display.log`.
+
+For a permanently mounted screen, add `--kiosk` (or `--start-fullscreen`) to the
+Chromium invocation in that script.

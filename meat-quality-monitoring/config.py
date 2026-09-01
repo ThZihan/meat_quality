@@ -307,3 +307,20 @@ CLOUD_REQUEUE_INTERVAL = float(os.environ.get("CLOUD_REQUEUE_INTERVAL", "1800"))
 STORAGE_SACRIFICE_UNSENT_IMAGES = os.environ.get(
     "STORAGE_SACRIFICE_UNSENT_IMAGES", "1"
 ) not in ("0", "false", "False")
+
+# ============================================================================
+# Image storage budget
+# ============================================================================
+# Gas data and images travel on completely separate pipelines -- different
+# processes, endpoints, queues and retry logic -- and neither can block the
+# other. The one thing they share is this SD card, so images get a hard budget
+# and the storage guard enforces it on every pass, independently of the free
+# space floor.
+#
+# The point is isolation: images self-limit long before the disk is threatened,
+# so gas data always has room no matter how long the image uplink is down. At
+# 1.22 MiB per capture this holds roughly 28 hours of images; gas data for the
+# same period is about 22 MiB.
+IMAGE_BUDGET_BYTES = int(
+    os.environ.get("IMAGE_BUDGET_BYTES", str(4 * 1024 * 1024 * 1024))  # 4 GiB
+)

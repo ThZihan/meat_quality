@@ -313,8 +313,101 @@ def reclaim_unsent_images(target: int) -> int:
 # Orchestration
 # ---------------------------------------------------------------------------
 
+def enforce_image_budget(dry_run: bool = False) -> int:
+    """Keep the image directories inside IMAGE_BUDGET_BYTES.
+
+    Runs every pass, whatever the free space, so images can never grow into the
+    room gas data needs. The two pipelines are independent in transport; this is
+    what makes them independent in storage too.
+
+    Uploaded images go first. Only if the budget is still exceeded are the
+    oldest un-uploaded ones shed -- at that point the image uplink has been down
+    long enough to bank a day of captures, and the alternative is letting them
+    consume the whole card.
+    """
+    pending_dir = Path(os.environ.get("PENDING_SYNC_DIR", "/home/zihan/pending_sync"))
+    archive_dir = Path(config.IMAGE_ARCHIVE_DIR)
+
+    def dir_size(p: Path) -> int:
+        return sum(f.stat().st_size for f in p.rglob("*") if f.is_file()) if p.is_dir() else 0
+
+    used = dir_size(pending_dir) + dir_size(archive_dir)
+    if used <= config.IMAGE_BUDGET_BYTES:
+        return 0
+
+    over = used - config.IMAGE_BUDGET_BYTES
+    logger.warning("Images use %s, over the %s budget by %s — trimming",
+                   human(used), human(config.IMAGE_BUDGET_BYTES), human(over))
+    if dry_run:
+        return 0
+
+    reclaimed = 0
+    # Uploaded copies first; the server already holds these.
+    for path in _oldest_first(archive_dir):
+        if reclaimed >= over:
+            break
+        try:
+            size = path.stat().st_size
+            path.unlink()
+            reclaimed += size
+        except OSError as e:
+            logger.warning("Could not remove %s: %s", path, e)
+
+    if reclaimed < over:
+        shed = reclaim_unsent_images_by_bytes(pending_dir, over - reclaimed)
+        reclaimed += shed
+
+    logger.info("Reclaimed %s to stay inside the image budget", human(reclaimed))
+    return reclaimed
+
+
+def reclaim_unsent_images_by_bytes(pending_dir: Path, needed: int) -> int:
+    """Shed the oldest un-uploaded images until `needed` bytes are freed."""
+    if not config.STORAGE_SACRIFICE_UNSENT_IMAGES:
+        logger.error(
+            "Image budget exceeded with only un-uploaded images left and "
+            "STORAGE_SACRIFICE_UNSENT_IMAGES is off. Not trimming."
+        )
+        return 0
+
+    sync_db = Path(os.environ.get("SYNC_DB_PATH", "/home/zihan/sync_state.db"))
+    reclaimed = 0
+    removed = 0
+    for path in _oldest_first(pending_dir):
+        if reclaimed >= needed:
+            break
+        try:
+            size = path.stat().st_size
+            path.unlink()
+            reclaimed += size
+            removed += 1
+            if sync_db.exists():
+                with sqlite3.connect(sync_db) as conn:
+                    conn.execute(
+                        "UPDATE images SET status = 'discarded_over_budget' "
+                        "WHERE filepath = ? AND status = 'pending'",
+                        (str(path),),
+                    )
+                    conn.commit()
+        except OSError as e:
+            logger.warning("Could not remove %s: %s", path, e)
+
+    if removed:
+        logger.error(
+            "Shed %d un-uploaded image(s) (%s) to stay inside the image budget. "
+            "The image uplink has been down long enough to bank a day of "
+            "captures — check it. Gas data is unaffected.",
+            removed, human(reclaimed),
+        )
+    return reclaimed
+
+
 def enforce(dry_run: bool = False) -> bool:
     """Bring free space back above the floor. Returns True if the floor holds."""
+    # Images are capped on every pass, regardless of free space, so they cannot
+    # grow into the space gas data needs.
+    enforce_image_budget(dry_run)
+
     current = free_bytes()
     floor = config.STORAGE_MIN_FREE_BYTES
     target = config.STORAGE_TARGET_FREE_BYTES
@@ -372,8 +465,12 @@ def report() -> None:
     print(f"Status         : {'OK' if usage.free >= config.STORAGE_MIN_FREE_BYTES else 'BELOW FLOOR'}")
     print(f"Database       : {human(db.get_database_size())}, {db.get_reading_count()} readings")
     print(f"Upload queue   : {queue['pending']} pending, {queue['synced']} synced, {queue['failed']} parked")
+    img_used = dir_size(pending_dir) + dir_size(archive_dir)
     print(f"Images pending : {human(dir_size(pending_dir))} in {pending_dir}")
     print(f"Images archived: {human(dir_size(archive_dir))} in {archive_dir}")
+    print(f"Image budget   : {human(img_used)} of {human(config.IMAGE_BUDGET_BYTES)} "
+          f"({100*img_used/config.IMAGE_BUDGET_BYTES:.1f}%)  "
+          f"{'OK' if img_used <= config.IMAGE_BUDGET_BYTES else 'OVER'}")
 
 
 def main() -> int:

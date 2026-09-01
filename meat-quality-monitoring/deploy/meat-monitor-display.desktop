@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Meat Monitor Display
+Comment=Open the Latest View and Dashboard pages once their servers answer
+Exec=/home/zihan/projects/meat-quality-monitoring/deploy/meat-monitor-display.sh
+Terminal=false
+X-GNOME-Autostart-enabled=true
+NoDisplay=false
