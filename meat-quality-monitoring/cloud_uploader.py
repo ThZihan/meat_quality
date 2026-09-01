@@ -125,11 +125,13 @@ class CloudUploader:
                 delivered += 1
                 time.sleep(config.CLOUD_UPLOAD_THROTTLE)
             elif retryable:
-                # The server is unreachable, not unhappy. Stop the batch and
-                # keep the queue in order rather than hammering a dead endpoint.
-                self.db.mark_sync_failed(row["id"], config.CLOUD_UPLOAD_MAX_ATTEMPTS)
-                self.failed += 1
-                logger.warning("Server unreachable; pausing this batch")
+                # The server is unreachable, not unhappy. Leave the row exactly
+                # as it is -- still 'pending', retry_count untouched -- and stop
+                # the batch. Counting attempts here used to park rows as
+                # 'failed' after 20 cycles (~5 minutes of downtime), and nothing
+                # ever retries a parked row: a long outage silently stranded the
+                # backlog. An unreachable server must cost latency, never data.
+                logger.warning("Server unreachable; pausing this batch (queue intact)")
                 break
             else:
                 self.db.mark_sync_failed(row["id"], max_attempts=0)
@@ -137,16 +139,43 @@ class CloudUploader:
 
         return delivered
 
+    def requeue_parked(self) -> int:
+        """Return parked rows to the queue for another attempt.
+
+        Only rows the server actively rejected reach 'failed'. A rejection can
+        still be transient from the client's point of view -- an expired key, a
+        server-side schema fix, a bad deploy -- so nothing stays parked forever.
+        Orphans parked by --park-orphans are deliberately left alone.
+        """
+        with sqlite3.connect(self.db.db_path) as conn:
+            cursor = conn.execute(
+                """
+                UPDATE pending_sync
+                SET sync_status = 'pending', retry_count = 0
+                WHERE sync_status = 'failed'
+                """
+            )
+            conn.commit()
+            return cursor.rowcount
+
     def run_forever(self) -> None:
         logger.info("Cloud uploader started -> %s", config.SENSOR_API_BASE)
         if not config.SENSOR_API_KEY:
             logger.warning("SENSOR_API_KEY is empty; the server will likely reject uploads")
+
+        last_requeue = time.monotonic()
 
         while keep_running:
             try:
                 self.drain()
             except Exception:
                 logger.exception("Upload cycle failed")
+
+            if time.monotonic() - last_requeue >= config.CLOUD_REQUEUE_INTERVAL:
+                requeued = self.requeue_parked()
+                if requeued:
+                    logger.info("Returned %d parked row(s) to the queue", requeued)
+                last_requeue = time.monotonic()
 
             stats = self.db.get_sync_queue_stats()
             if stats["pending"] == 0:
@@ -195,6 +224,8 @@ def main() -> int:
                         help="Park queued rows older than DAYS whose reading is gone")
     parser.add_argument("--status", action="store_true",
                         help="Print queue counts and exit")
+    parser.add_argument("--requeue-parked", action="store_true",
+                        help="Return every parked row to the queue and exit")
     args = parser.parse_args()
 
     signal.signal(signal.SIGINT, _signal_handler)
@@ -202,6 +233,11 @@ def main() -> int:
 
     if args.status:
         print(json.dumps(get_db_manager().get_sync_queue_stats(), indent=2))
+        return 0
+
+    if args.requeue_parked:
+        n = CloudUploader().requeue_parked()
+        logger.info("Returned %d parked row(s) to the queue", n)
         return 0
 
     if args.park_orphans is not None:

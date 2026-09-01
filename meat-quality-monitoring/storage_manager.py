@@ -248,6 +248,68 @@ def _vacuum(db_path: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Stage 4 — last resort: un-uploaded images
+# ---------------------------------------------------------------------------
+
+def reclaim_unsent_images(target: int) -> int:
+    """Delete the oldest images that have NOT reached the server yet.
+
+    This is the only stage that discards data the server has never seen, and it
+    exists because the alternative is worse. Images cost 1.22 MiB each while a
+    sensor reading costs 676 bytes: one image is roughly 1,900 readings' worth
+    of disk. If the uplink is down long enough, un-uploaded images fill the card,
+    SQLite writes start failing, the BLE receiver stops acknowledging, and the
+    node's own 36-minute buffer overflows -- losing the gas readings, which are
+    the primary measurement, in order to preserve photographs.
+
+    So when nothing else can reach the floor, the oldest images are sacrificed
+    to keep sensor ingest alive. Set STORAGE_SACRIFICE_UNSENT_IMAGES=0 to refuse
+    this and let the guard fail loudly instead.
+    """
+    if not config.STORAGE_SACRIFICE_UNSENT_IMAGES:
+        logger.error(
+            "Below the floor with only un-uploaded images left to reclaim, and "
+            "STORAGE_SACRIFICE_UNSENT_IMAGES is off. Refusing to delete them. "
+            "Sensor ingest WILL stop when the disk fills."
+        )
+        return 0
+
+    pending_dir = Path(os.environ.get("PENDING_SYNC_DIR", "/home/zihan/pending_sync"))
+    sync_db = Path(os.environ.get("SYNC_DB_PATH", "/home/zihan/sync_state.db"))
+    reclaimed = 0
+    removed = 0
+
+    for path in _oldest_first(pending_dir):
+        if free_bytes() >= target:
+            break
+        try:
+            size = path.stat().st_size
+            path.unlink()
+            reclaimed += size
+            removed += 1
+            # Tell the image ledger, so sync.py does not keep trying to upload
+            # a file that no longer exists.
+            if sync_db.exists():
+                with sqlite3.connect(sync_db) as conn:
+                    conn.execute(
+                        "UPDATE images SET status = 'discarded_low_disk' "
+                        "WHERE filepath = ? AND status = 'pending'",
+                        (str(path),),
+                    )
+                    conn.commit()
+        except OSError as e:
+            logger.warning("Could not remove %s: %s", path, e)
+
+    if removed:
+        logger.error(
+            "LAST RESORT: discarded %d un-uploaded image(s) (%s) that the server "
+            "never received, to keep sensor ingest alive. Check the uplink.",
+            removed, human(reclaimed),
+        )
+    return reclaimed
+
+
+# ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 
@@ -273,6 +335,7 @@ def enforce(dry_run: bool = False) -> bool:
         ("archived images", reclaim_archived_images),
         ("logs and backups", reclaim_logs),
         ("synced readings", reclaim_database),
+        ("un-uploaded images (last resort)", reclaim_unsent_images),
     ):
         if free_bytes() >= target:
             break
@@ -286,9 +349,9 @@ def enforce(dry_run: bool = False) -> bool:
         return True
 
     logger.error(
-        "Could not reach the %s floor — %s free after reclaiming %s. Everything "
-        "still on disk is either un-uploaded data or outside this guard's scope; "
-        "it will NOT be deleted. Check the upload queue and free space manually.",
+        "Could not reach the %s floor — %s free after reclaiming %s. What remains "
+        "is un-uploaded sensor data, which is never deleted. Sensor ingest will "
+        "stop when the disk fills; restore the uplink or free space manually.",
         human(floor), human(current), human(total),
     )
     return False

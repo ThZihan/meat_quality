@@ -72,8 +72,13 @@ const unsigned long READ_INTERVAL_MS   = 3000;  // one reading every 3 s
 const unsigned long ACK_TIMEOUT_MS     = 4000;  // re-send if unacked this long
 const unsigned long SEND_GAP_MS        = 60;    // spacing while draining backlog
 
-// 720 x 3 s = 36 minutes of backlog held in RAM (~34 KB of the ESP32's 320 KB).
-const uint16_t QUEUE_CAPACITY = 720;
+// 1200 x 3 s = 1 hour of backlog held in RAM (~53 KB of the ESP32's 320 KB).
+// Sized to cover a Pi reboot, a failed service restart, or a short power cut on
+// the Pi without dropping anything. Beyond this the oldest readings are shed --
+// the node has finite memory, so a multi-hour Pi outage is the one scenario
+// that can still cost data. Free heap is logged at boot so the margin against
+// the NimBLE stack stays visible.
+const uint16_t QUEUE_CAPACITY = 1200;
 
 // Only checkpoint to flash once the backlog looks like a real outage
 // (20 readings = ~1 minute), and never more than once a minute.
@@ -648,6 +653,10 @@ void setup() {
 
     Serial.printf("[BOOT] boot #%lu, seq starts at %lu, %u reading(s) recovered\n",
                   (unsigned long)bootId, (unsigned long)nextSeq, queueCount);
+    Serial.printf("[BOOT] queue capacity %u readings (%u min), free heap %lu bytes\n",
+                  QUEUE_CAPACITY,
+                  (unsigned)((uint32_t)QUEUE_CAPACITY * READ_INTERVAL_MS / 60000),
+                  (unsigned long)ESP.getFreeHeap());
 
     // ── BLE peripheral ──
     NimBLEDevice::init(DEVICE_NAME);

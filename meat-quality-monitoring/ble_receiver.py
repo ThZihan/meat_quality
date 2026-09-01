@@ -160,9 +160,15 @@ class ReadingSink:
 
         # Queue for the cloud in the SAME call, before the ACK goes out. A row
         # in sensor_readings but not in pending_sync would never be backed up.
-        self.db.enqueue_pending_sync(row_id, self._api_payload(
+        # This raises if it cannot be queued, which propagates out of handle()
+        # and withholds the ACK, so the node keeps its copy and re-sends.
+        sync_id = self.db.enqueue_pending_sync(row_id, self._api_payload(
             timestamp, quality, payload, sensor_status
         ))
+        if not sync_id:
+            raise RuntimeError(
+                f"reading {row_id} stored but not queued for upload; refusing to ACK"
+            )
         self.stored += 1
         return seq
 

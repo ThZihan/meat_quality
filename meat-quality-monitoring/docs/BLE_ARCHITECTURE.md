@@ -309,3 +309,46 @@ protocol absorbs: nothing leaves the node's queue until it is acknowledged, and
 duplicates collapse on `UNIQUE(source_id)`. Measured throughput comfortably
 exceeds the 3-second production rate, so the backlog drains rather than grows.
 Reconnect churn is a known rough edge, not a data-loss path.
+
+## Failure modes and what they cost
+
+Measured rates on this hardware:
+
+| Data | Per reading/image | Per day | Per 72 h |
+|---|---|---|---|
+| Sensor readings (3 s) | 676 B | 19 MiB | **56 MiB** |
+| Camera images (30 s) | 1.22 MiB | 3.4 GiB | **10.3 GiB** |
+
+An image costs the same disk as roughly **1,900 sensor readings**. That ratio
+drives the whole reclaim policy: images are the only thing that can realistically
+fill the card, and sensor data is what must survive.
+
+### What happens when each part fails
+
+| Failure | Behaviour | Data lost |
+|---|---|---|
+| **Server / internet down** | Readings keep arriving over BLE and are stored locally. `pending_sync` grows; the uploader retries forever and never parks a row for a network error. | **None**, until the disk fills |
+| **Server rejects a payload (4xx)** | That row is parked as `failed` rather than blocking the queue. Parked rows are automatically returned to the queue every 30 min (`CLOUD_REQUEUE_INTERVAL`), and `--requeue-parked` forces it. | **None** |
+| **Server rate-limits (429)** | Treated as retryable; the batch pauses and resumes next cycle. Uploads are throttled to avoid provoking it. | **None** |
+| **BLE link drops** | The node keeps every un-acknowledged reading and replays it on reconnect. Duplicates collapse on `UNIQUE(source_id)`. | **None** |
+| **Pi down / receiver stopped** | The node buffers 1 hour in RAM, checkpointing the oldest 128 readings to NVS. | **None under 1 h**; oldest shed beyond that |
+| **Pi power cut** | Everything already committed to SQLite survives. The node holds its own copy until acknowledged, so anything in flight is re-sent. | **None** |
+| **ESP power cut** | The NVS checkpoint restores the oldest 128 readings. | Un-checkpointed remainder of the RAM queue |
+| **Disk write fails (full)** | `insert_sensor_reading` raises, the ACK is withheld, and the node keeps the reading and re-sends. Ingest stalls rather than silently dropping. | **None** while the node's 1 h buffer holds |
+
+### The one real limit
+
+The Pi is the durable store, and its card is finite. With the uplink down,
+**images fill the free space above the 5 GiB floor in roughly 41 hours.** The
+storage guard reclaims in this order, and never touches un-uploaded sensor data:
+
+1. uploaded images → 2. logs and backups → 3. synced readings →
+4. **oldest un-uploaded images** (last resort, `STORAGE_SACRIFICE_UNSENT_IMAGES`)
+
+Stage 4 exists because the alternative is worse: letting the card fill stops
+SQLite writes, which stops acknowledgements, which overflows the node's buffer
+and loses the gas readings — the primary measurement — to preserve photographs.
+
+For a genuine 72-hour offline run, either keep the uplink available (sensor data
+alone is only 56 MiB, so it is never the problem), raise the image interval from
+30 s, or add storage. Sensor readings alone would last **years** on this card.

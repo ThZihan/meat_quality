@@ -293,3 +293,17 @@ BLE_PUSH_CLOCK = os.environ.get("BLE_PUSH_CLOCK", "0") not in ("0", "false", "Fa
 # backlog is pushed at full speed; the uploader treats 429 as retryable, but
 # pacing avoids provoking it in the first place.
 CLOUD_UPLOAD_THROTTLE = float(os.environ.get("CLOUD_UPLOAD_THROTTLE", "0.4"))
+
+# How often parked ('failed') upload rows are returned to the queue for another
+# attempt. Nothing stays parked forever: a rejection can be transient from the
+# client's side (expired key, bad deploy, server-side schema fix).
+CLOUD_REQUEUE_INTERVAL = float(os.environ.get("CLOUD_REQUEUE_INTERVAL", "1800"))
+
+# Last-resort permission: when nothing else can free space, discard the OLDEST
+# un-uploaded images so sensor ingest keeps working. One image costs as much
+# disk as ~1,900 readings, and letting the card fill stops ingest entirely --
+# losing the gas readings, which are the primary measurement. Set to 0 to
+# refuse, in which case the guard fails loudly and ingest stops when full.
+STORAGE_SACRIFICE_UNSENT_IMAGES = os.environ.get(
+    "STORAGE_SACRIFICE_UNSENT_IMAGES", "1"
+) not in ("0", "false", "False")

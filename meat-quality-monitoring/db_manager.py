@@ -650,8 +650,13 @@ class DatabaseManager:
                 conn.commit()
                 return cursor.lastrowid
         except Exception as e:
+            # Raise rather than return 0. A reading that is in sensor_readings
+            # but missing from pending_sync would never reach the server, and
+            # swallowing the error here would let the caller acknowledge it to
+            # the node, which then discards its own copy. Losing this row is
+            # exactly the failure the queue exists to prevent.
             logger.error(f"Error queueing reading {local_reading_id} for sync: {e}")
-            return 0
+            raise
 
     def fetch_pending_sync(self, limit: int = 50) -> List[Dict]:
         """Return the oldest queued rows, oldest first, so history uploads in order."""
