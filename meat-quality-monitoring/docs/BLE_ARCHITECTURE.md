@@ -227,3 +227,85 @@ sudo systemctl enable --now meat-monitor-client
 
 Both firmwares write to the same `sensor_readings` table with the same
 `device_id`, so history stays continuous across a switch in either direction.
+
+## Field notes — things that actually broke
+
+Everything below was found by bringing this up on real hardware (Pi 5 + BlueZ
+5.82 + bleak 3.0.2 + ESP32-WROOM-32 + NimBLE 2.x). They are recorded because
+each one presents as "BLE is flaky" and none is obvious from the symptom.
+
+### ModemManager corrupts the serial console
+
+ModemManager probes any new serial device with AT commands and toggles
+DTR/RTS, which resets the ESP32 and shredded every diagnostic capture. Fixed by
+`/etc/udev/rules.d/99-esp32-ignore-modemmanager.rules`, which tags the CP210x
+bridge with `ID_MM_DEVICE_IGNORE`. Without it, serial output is unusable.
+
+### BlueZ caches the GATT database per device
+
+BlueZ stores a resolved copy of the attribute table under
+`/var/lib/bluetooth/<adapter>/cache/<device>`. **Any firmware change that alters
+the characteristic layout invalidates it, and BlueZ does not notice.** Stale
+handles produced a phantom ACK — a write the Pi never made, which discarded a
+queued reading. After changing the GATT profile:
+
+```bash
+bluetoothctl remove <NODE_MAC>
+sudo rm -rf /var/lib/bluetooth/<ADAPTER_MAC>/cache/<NODE_MAC>
+sudo systemctl restart bluetooth
+```
+
+### GATT writes are the fragile half of this link
+
+Notification delivery is solid; writes are not. Measured on this hardware:
+
+| Pattern | Result |
+|---|---|
+| Subscribe, never write | Stable, streams continuously |
+| Write **with** response, after subscribing | Stable |
+| Write **without** response (`response=False`) | `TimeoutError`, link dies |
+| Write **before** `start_notify` | Notifications never delivered at all |
+| One ACK write per reading | `GATT Protocol Error: Unlikely Error`, disconnect |
+
+That shaped three decisions in `ble_receiver.py`, all load-bearing:
+
+1. **Every write uses `response=True`.** The write-without-response path goes
+   through BlueZ's `AcquireWrite` file descriptor and hangs.
+2. **Subscribe first, write second.** Writing before `StartNotify` silently
+   kills notification delivery for the whole connection.
+3. **ACKs are cumulative and rate-limited** (`BLE_ACK_INTERVAL`, 1 s). One write
+   clears every reading up to that sequence number, so a backlog drain costs one
+   write per second instead of one per reading.
+
+Writes are also serialised behind a single `asyncio.Lock`: two concurrent GATT
+writes on one connection drop the link about two seconds later.
+
+`BLE_PUSH_CLOCK` defaults to **off** for the same reason — see config.py. It
+costs nothing, because timestamps are reconstructed from age-since-capture.
+
+### Sequence numbers must start at 1
+
+Zero is the "nothing acknowledged yet" value of `lastAckedSeq`, and `ackUpTo()`
+returns early on `seq <= lastAckedSeq`. A reading numbered 0 can therefore never
+be acknowledged; it sits at the head of the queue and blocks everything behind
+it forever. Only reachable on a freshly erased NVS, which is exactly what a new
+deployment has. `restoreQueue()` also discards any seq-0 entry it finds.
+
+### The NVS partition bounds the checkpoint
+
+The stock partition table gives `nvs` 0x5000 (20 KiB). The full 720-reading
+queue is 31 KiB, so `putBytes` failed silently, `q_len` promised data the blob
+did not contain, and the node eventually wedged with no serial output at all.
+`QUEUE_PERSIST_MAX` is now 128 readings (5,632 bytes) and the write result is
+checked. A custom partition table with a larger NVS was tried and made the app
+reset before producing any output (`rst:0x3 SW_RESET` in a tight loop), so the
+stock table plus a bounded checkpoint is the supported configuration.
+
+### Current behaviour
+
+The link re-establishes every ~30 s under sustained load. That costs a few
+seconds of latency and produces the occasional duplicate, both of which the
+protocol absorbs: nothing leaves the node's queue until it is acknowledged, and
+duplicates collapse on `UNIQUE(source_id)`. Measured throughput comfortably
+exceeds the 3-second production rate, so the backlog drains rather than grows.
+Reconnect churn is a known rough edge, not a data-loss path.

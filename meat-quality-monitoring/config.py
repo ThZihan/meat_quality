@@ -269,3 +269,27 @@ IMAGE_ARCHIVE_DIR = os.path.expanduser(
 STORAGE_DB_PRUNE_BATCH = int(os.environ.get("STORAGE_DB_PRUNE_BATCH", "5000"))
 # Never prune below this many readings, however tight space gets.
 STORAGE_DB_MIN_ROWS = int(os.environ.get("STORAGE_DB_MIN_ROWS", "10000"))
+
+# How often the Pi tells the node what it has durably stored. ACKs are
+# cumulative (one write clears every reading up to that sequence number), so
+# this is a batching interval, not a per-reading cost. GATT writes are the
+# fragile half of the BLE link, so writing rarely is deliberate.
+BLE_ACK_INTERVAL = float(os.environ.get("BLE_ACK_INTERVAL", "1.0"))
+
+# Push the Pi's wall clock to the node so its readings carry real epochs.
+#
+# OFF by default, from measurement: with the clock push enabled this link drops
+# roughly 2.4 s after every write, yielding one reading per connection. With it
+# disabled the same hardware holds a single connection indefinitely and streams
+# continuously (80 s, 50+ readings, no disconnects).
+#
+# Turning it off costs nothing in accuracy. Every reading carries the age in ms
+# since it was captured, and the receiver subtracts that from the Pi's own
+# clock; only sensor_status.time_source changes, from "esp_clock" to
+# "pi_clock_minus_age". Set BLE_PUSH_CLOCK=1 to re-enable and re-measure.
+BLE_PUSH_CLOCK = os.environ.get("BLE_PUSH_CLOCK", "0") not in ("0", "false", "False")
+
+# Pause between individual uploads. The server rate-limits (HTTP 429) when a
+# backlog is pushed at full speed; the uploader treats 429 as retryable, but
+# pacing avoids provoking it in the first place.
+CLOUD_UPLOAD_THROTTLE = float(os.environ.get("CLOUD_UPLOAD_THROTTLE", "0.4"))

@@ -1,0 +1,5 @@
+# The ESP32 sensor node presents as a Silicon Labs CP210x UART bridge.
+# ModemManager probes serial devices with AT commands and toggles DTR/RTS,
+# which resets the ESP32 and corrupts its serial output. Keep it away.
+ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ENV{ID_MM_DEVICE_IGNORE}="1"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ENV{ID_MM_PORT_IGNORE}="1"

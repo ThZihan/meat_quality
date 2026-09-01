@@ -80,6 +80,20 @@ const uint16_t QUEUE_CAPACITY = 720;
 const uint16_t      QUEUE_PERSIST_THRESHOLD = 20;
 const unsigned long QUEUE_PERSIST_MIN_GAP_MS = 60000;
 
+// Upper bound on how many readings are written to flash in one checkpoint.
+// The RAM queue holds 720, but persisting all of it is 31 KiB -- more than the
+// stock 20 KiB `nvs` partition can store. Those writes failed silently, the
+// recorded length promised data the blob did not contain, and the node
+// eventually wedged. 128 readings is 5,632 bytes, which fits the stock
+// partition with room to spare and keeps the flash-cache-disabled window short
+// while BLE is running. The OLDEST readings are kept: they are the ones
+// closest to being dropped from the ring.
+//
+// Consequence, deliberately accepted: a power cut during an outage longer than
+// ~6 minutes loses the readings beyond this bound. The RAM queue still covers
+// 36 minutes of Pi downtime, which is the failure this design actually targets.
+const uint16_t QUEUE_PERSIST_MAX = 128;
+
 // Sequence numbers are handed out from pre-reserved blocks so the NVS counter
 // is written once per block instead of once per reading. A reboot burns the
 // remainder of the current block -- harmless, since seq only has to be unique
@@ -160,6 +174,9 @@ volatile bool     clockValid    = false;
 volatile uint64_t epochOffsetMs = 0;
 
 // Diagnostics
+uint32_t lastSentSeq    = 0;   // highest seq actually put on the air
+uint16_t connHandle     = BLE_HS_CONN_HANDLE_NONE;
+volatile bool persistRequested = false;
 uint32_t droppedCount   = 0;
 uint32_t deliveredCount = 0;
 uint32_t resendCount    = 0;
@@ -191,6 +208,11 @@ void reserveSeqBlock() {
 }
 
 uint32_t takeSeq() {
+    // Sequence numbers start at 1, never 0. Zero is the "nothing acknowledged
+    // yet" sentinel for lastAckedSeq, so a reading numbered 0 could never be
+    // acknowledged (ackUpTo returns early on seq <= lastAckedSeq) and the node
+    // would retransmit it forever. Only ever hit on a freshly erased NVS.
+    if (nextSeq == 0) nextSeq = 1;
     if (nextSeq >= seqHighWater) reserveSeqBlock();
     return nextSeq++;
 }
@@ -200,27 +222,44 @@ void persistQueue(bool force = false) {
     if (!queueDirty && !force) return;
     if (!force && millis() - lastPersistMs < QUEUE_PERSIST_MIN_GAP_MS) return;
 
-    uint16_t n = queueCount;
+    uint16_t n = queueCount < QUEUE_PERSIST_MAX ? queueCount : QUEUE_PERSIST_MAX;
     if (n == 0) {
         prefs.remove("q_data");
         prefs.putUShort("q_len", 0);
-    } else {
-        // Flatten the ring into a contiguous blob starting at the oldest entry.
-        static Reading flat[QUEUE_CAPACITY];
-        for (uint16_t i = 0; i < n; i++) {
-            flat[i] = queueBuf[(queueHead + i) % QUEUE_CAPACITY];
-        }
-        prefs.putBytes("q_data", flat, (size_t)n * sizeof(Reading));
-        prefs.putUShort("q_len", n);
+        lastPersistMs = millis();
+        queueDirty = false;
+        Serial.println(F("[NVS] Checkpoint cleared (queue empty)"));
+        return;
     }
+
+    // Flatten the ring into a contiguous blob starting at the oldest entry.
+    static Reading flat[QUEUE_PERSIST_MAX];
+    for (uint16_t i = 0; i < n; i++) {
+        flat[i] = queueBuf[(queueHead + i) % QUEUE_CAPACITY];
+    }
+
+    size_t want = (size_t)n * sizeof(Reading);
+    size_t wrote = prefs.putBytes("q_data", flat, want);
+    if (wrote != want) {
+        // Record the failure rather than leaving a q_len that promises data
+        // the blob does not contain -- that is what made restore silently
+        // discard everything after the last wedge.
+        prefs.putUShort("q_len", 0);
+        lastPersistMs = millis();
+        Serial.printf("[NVS] Checkpoint FAILED: wrote %u of %u bytes\n",
+                      (unsigned)wrote, (unsigned)want);
+        return;
+    }
+    prefs.putUShort("q_len", n);
     lastPersistMs = millis();
     queueDirty = false;
-    Serial.printf("[NVS] Checkpointed %u queued reading(s)\n", n);
+    Serial.printf("[NVS] Checkpointed %u of %u queued reading(s) (%u bytes)\n",
+                  n, queueCount, (unsigned)want);
 }
 
 void restoreQueue() {
     uint16_t n = prefs.getUShort("q_len", 0);
-    if (n == 0 || n > QUEUE_CAPACITY) return;
+    if (n == 0 || n > QUEUE_PERSIST_MAX) return;
 
     size_t expected = (size_t)n * sizeof(Reading);
     if (prefs.getBytesLength("q_data") != expected) {
@@ -232,7 +271,23 @@ void restoreQueue() {
     prefs.getBytes("q_data", queueBuf, expected);
     queueHead  = 0;
     queueCount = n;
-    Serial.printf("[NVS] Restored %u reading(s) from before the reboot\n", n);
+
+    // Drop anything numbered 0. Zero is the "nothing acknowledged yet"
+    // sentinel, so such a reading can never be acknowledged and would sit at
+    // the head of the queue blocking every reading behind it forever. Only
+    // ever produced by a pre-fix build, but the queue survives reflashes.
+    uint16_t dropped = 0;
+    while (queueCount > 0 && queueBuf[queueHead].seq == 0) {
+        queueHead = (queueHead + 1) % QUEUE_CAPACITY;
+        queueCount--;
+        dropped++;
+    }
+    if (dropped) {
+        queueDirty = true;
+        Serial.printf("[NVS] Discarded %u un-acknowledgeable reading(s) numbered 0\n",
+                      dropped);
+    }
+    Serial.printf("[NVS] Restored %u reading(s) from before the reboot\n", queueCount);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -269,6 +324,11 @@ void ackUpTo(uint32_t seq) {
     }
     if (removed) {
         queueDirty = true;
+        // Clear the in-flight marker. Without this the reading that just moved
+        // to the head is judged "in flight" against the previous send's
+        // timestamp, so it waits the full ACK timeout (4 s) before going out --
+        // turning a backlog drain into one reading every four seconds.
+        lastSendMs = 0;
         Serial.printf("[ACK] seq<=%lu confirmed — %u cleared, %u still queued\n",
                       (unsigned long)seq, removed, queueCount);
         // The backlog is gone; clear the flash copy so a reboot cannot resurrect it.
@@ -301,16 +361,17 @@ void resolveQueuedEpochs() {
 class ServerCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer* srv, NimBLEConnInfo& info) override {
         piConnected = true;
-        // 10 inches away: favour latency over power so the backlog drains fast.
-        srv->updateConnParams(info.getConnHandle(), 12, 24, 0, 400);
-        Serial.println(F("[BLE] Pi connected"));
+        connHandle = info.getConnHandle();
+        Serial.printf("[BLE] Pi connected (handle %u)\n", connHandle);
     }
 
     void onDisconnect(NimBLEServer* srv, NimBLEConnInfo& info, int reason) override {
         piConnected = false;
         piSubscribed = false;
-        Serial.printf("[BLE] Pi disconnected (reason %d) — queueing locally\n", reason);
-        persistQueue(true);   // an unexpected drop is exactly when flash matters
+        connHandle = BLE_HS_CONN_HANDLE_NONE;
+        lastSendMs = 0;
+        Serial.printf("[BLE] Pi disconnected (reason 0x%03X) — queueing locally\n", reason);
+        persistRequested = true;   // loop() owns flash; see note above
         NimBLEDevice::startAdvertising();
     }
 
@@ -322,9 +383,24 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 class AckCallbacks : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic* ch, NimBLEConnInfo& info) override {
         NimBLEAttValue v = ch->getValue();
-        if (v.length() < 4) return;
+        Serial.printf("[ACK] write: %u byte(s):", (unsigned)v.length());
+        for (size_t i = 0; i < v.length() && i < 12; i++) Serial.printf(" %02X", v.data()[i]);
+        Serial.println();
+
+        if (v.length() != 4) {
+            Serial.println(F("[ACK] Ignored: an ACK is exactly 4 bytes"));
+            return;
+        }
         uint32_t seq;
         memcpy(&seq, v.data(), 4);   // little-endian, matches struct.pack('<I')
+
+        // Never trust an ACK for a sequence number we have not actually sent.
+        // A stale or spurious write must not be able to discard queued data.
+        if (seq > lastSentSeq) {
+            Serial.printf("[ACK] Rejected seq %lu: nothing above %lu has been sent\n",
+                          (unsigned long)seq, (unsigned long)lastSentSeq);
+            return;
+        }
         ackUpTo(seq);
     }
 };
@@ -510,16 +586,20 @@ void pumpQueue() {
 
     char payload[256];
     buildPayload(oldest, payload, sizeof(payload));
+    size_t len = strlen(payload);
 
-    if (dataChar->notify((uint8_t*)payload, strlen(payload))) {
-        if (inFlight) {
-            resendCount++;
-            Serial.printf("[TX] Re-sent seq %lu (no ACK in %lu ms)\n",
-                          (unsigned long)oldest.seq, ACK_TIMEOUT_MS);
-        }
+    bool sent = dataChar->notify((const uint8_t*)payload, len, connHandle);
+    if (sent) {
+        if (oldest.seq > lastSentSeq) lastSentSeq = oldest.seq;
+        Serial.printf("[TX] %s seq %lu (%u bytes, %u queued)\n",
+                      inFlight ? "re-sent" : "sent",
+                      (unsigned long)oldest.seq, (unsigned)len, queueCount);
+        if (inFlight) resendCount++;
         lastSendMs = now;
     } else {
         // Notify failed (buffers full / link busy) — retry on the next pass.
+        Serial.printf("[TX] notify failed for seq %lu (%u bytes)\n",
+                      (unsigned long)oldest.seq, (unsigned)len);
         lastSendMs = now - gap + SEND_GAP_MS;
     }
 }
@@ -562,7 +642,7 @@ void setup() {
     prefs.putUInt("boot_id", bootId);
 
     seqHighWater = prefs.getUInt("seq_hwm", 0);
-    nextSeq = seqHighWater;        // burn the rest of the old block
+    nextSeq = seqHighWater > 0 ? seqHighWater : 1;   // burn the rest of the old block
     reserveSeqBlock();
     restoreQueue();
 
@@ -584,11 +664,11 @@ void setup() {
     dataChar->setCallbacks(new DataCallbacks());
 
     NimBLECharacteristic* ackChar = svc->createCharacteristic(
-        CH_ACK_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+        CH_ACK_UUID, NIMBLE_PROPERTY::WRITE);
     ackChar->setCallbacks(new AckCallbacks());
 
     NimBLECharacteristic* timeChar = svc->createCharacteristic(
-        CH_TIME_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+        CH_TIME_UUID, NIMBLE_PROPERTY::WRITE);
     timeChar->setCallbacks(new TimeCallbacks());
 
     statusChar = svc->createCharacteristic(CH_STAT_UUID, NIMBLE_PROPERTY::READ);
@@ -629,8 +709,13 @@ void loop() {
     // ── Drain the backlog, retransmitting anything still unacked. ──
     pumpQueue();
 
-    // ── Opportunistic checkpoint while an outage drags on. ──
-    if (queueDirty && queueCount >= QUEUE_PERSIST_THRESHOLD) persistQueue();
+    // ── All flash writes happen here, never inside a BLE callback. ──
+    if (persistRequested) {
+        persistRequested = false;
+        persistQueue(true);
+    } else if (queueDirty && queueCount >= QUEUE_PERSIST_THRESHOLD) {
+        persistQueue();
+    }
 
     delay(10);
 }

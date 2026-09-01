@@ -123,6 +123,7 @@ class CloudUploader:
                 self.db.mark_sync_uploaded(row["id"])
                 self.uploaded += 1
                 delivered += 1
+                time.sleep(config.CLOUD_UPLOAD_THROTTLE)
             elif retryable:
                 # The server is unreachable, not unhappy. Stop the batch and
                 # keep the queue in order rather than hammering a dead endpoint.

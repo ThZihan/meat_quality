@@ -244,13 +244,27 @@ async def _find_node() -> Optional[BLEDevice]:
 _find_node.last_rssi = None
 
 
-async def _push_time(client: BleakClient) -> None:
-    """Hand the ESP our wall clock. Failure here must never stop ingest."""
+async def _push_time(client: BleakClient, lock: asyncio.Lock) -> None:
+    """Hand the ESP our wall clock. Failure here must never stop ingest.
+
+    Takes the shared write lock: BlueZ does not tolerate two GATT writes racing
+    on one connection. A clock push overlapping an ACK write drops the link
+    about two seconds later, which looked exactly like a radio problem.
+    """
+    if not config.BLE_PUSH_CLOCK:
+        logger.debug("Clock push disabled; timestamps come from age-since-capture")
+        return
     epoch_ms = int(time.time() * 1000)
     try:
-        await client.write_gatt_char(
-            proto.CHAR_TIME_UUID, struct.pack("<Q", epoch_ms), response=False
-        )
+        async with lock:
+        # response=True is required, not a preference. Write-without-response
+        # goes through BlueZ's AcquireWrite file-descriptor path, which hangs
+        # against this peripheral and takes the whole link down with it
+        # (measured: no write = stable, write-with-response = stable,
+        # write-without-response = TimeoutError and disconnect).
+            await client.write_gatt_char(
+                proto.CHAR_TIME_UUID, struct.pack("<Q", epoch_ms), response=True
+            )
         logger.info("Pushed clock to node: %d ms", epoch_ms)
     except Exception as e:
         # The node keeps sending regardless; timestamps just fall back to
@@ -261,9 +275,13 @@ async def _push_time(client: BleakClient) -> None:
 async def _session(device: BLEDevice, sink: ReadingSink) -> None:
     """One connected session: subscribe, ACK everything, return on disconnect."""
     disconnected = asyncio.Event()
+    established = False
 
     def on_disconnect(_client: BleakClient) -> None:
-        logger.warning("Node disconnected")
+        # Bleak also fires this for connection attempts that never succeeded,
+        # which would otherwise fill the log with noise during a retry storm.
+        if established:
+            logger.warning("Node disconnected")
         disconnected.set()
 
     async with BleakClient(
@@ -271,28 +289,79 @@ async def _session(device: BLEDevice, sink: ReadingSink) -> None:
         disconnected_callback=on_disconnect,
         timeout=config.BLE_CONNECT_TIMEOUT,
     ) as client:
-        logger.info("Connected to %s (MTU %s)", device.address, client.mtu_size)
+        established = True
+        logger.info("Connected to %s", device.address)
         sink.link_rssi = _find_node.last_rssi
 
-        await _push_time(client)
+        # Notifications are handed to a worker rather than processed inline.
+        # A GATT write issued from inside a notification callback deadlocks
+        # BlueZ's D-Bus dispatch and takes the link down a couple of seconds
+        # later, so the callback must do nothing but hand the bytes off.
+        inbox: asyncio.Queue[bytes] = asyncio.Queue()
+        write_lock = asyncio.Lock()   # serialises every GATT write on this link
 
-        async def on_data(_char: BleakGATTCharacteristic, raw: bytearray) -> None:
-            seq = await sink.handle(bytes(raw))
-            if seq is None:
-                return
-            try:
-                # Durable on disk before this line runs. Safe to let the ESP
-                # forget everything up to and including this sequence number.
-                await client.write_gatt_char(
-                    proto.CHAR_ACK_UUID, struct.pack("<I", seq), response=False
-                )
-            except Exception as e:
-                # No ACK means the ESP keeps the reading and re-sends it. The
-                # data is already safe here, so this costs one duplicate.
-                logger.warning("ACK for seq=%d failed: %s", seq, e)
+        received = 0
+
+        def on_data(_char: BleakGATTCharacteristic, raw: bytearray) -> None:
+            nonlocal received
+            received += 1
+            if received <= 3 or received % 50 == 0:
+                logger.info("Notification #%d (%d bytes)", received, len(raw))
+            inbox.put_nowait(bytes(raw))
+
+        # Cumulative acknowledgement, TCP-style. ackUpTo() on the node drops
+        # every reading with seq <= the value written, so one ACK covers a whole
+        # batch and there is no need to write once per reading. That matters:
+        # GATT writes are the fragile part of this link (BlueZ answered a
+        # per-reading ACK storm with "Unlikely Error" and dropped the
+        # connection), so the fewer of them the better.
+        durable_seq = 0     # highest seq committed to SQLite
+        acked_seq = 0       # highest seq the node has been told about
+
+        async def store_worker() -> None:
+            nonlocal durable_seq
+            while True:
+                raw = await inbox.get()
+                try:
+                    seq = await sink.handle(raw)
+                    if seq is not None and seq > durable_seq:
+                        durable_seq = seq
+                except Exception:
+                    logger.exception("Failed to store a reading")
+                finally:
+                    inbox.task_done()
+
+        async def ack_worker() -> None:
+            nonlocal acked_seq
+            while True:
+                await asyncio.sleep(config.BLE_ACK_INTERVAL)
+                if durable_seq <= acked_seq:
+                    continue
+                seq = durable_seq   # everything up to here is on disk
+                try:
+                    async with write_lock:
+                        await client.write_gatt_char(
+                            proto.CHAR_ACK_UUID, struct.pack("<I", seq), response=True
+                        )
+                    acked_seq = seq
+                    logger.debug("Acknowledged through seq=%d", seq)
+                except Exception as e:
+                    # Without an ACK the node keeps the readings and re-sends
+                    # them. They are already safe here, so this costs
+                    # duplicates, never data.
+                    logger.warning("ACK through seq=%d failed: %s", seq, e)
+
+        worker = asyncio.gather(store_worker(), ack_worker())
 
         await client.start_notify(proto.CHAR_DATA_UUID, on_data)
         logger.info("Subscribed — receiving readings")
+
+        # The clock push happens AFTER subscribing, deliberately. Writing to a
+        # characteristic before StartNotify leaves BlueZ never delivering the
+        # notifications at all -- the node transmits, the callback never fires,
+        # and the link drops a couple of seconds later. Subscribing first also
+        # means no reading sent during setup can be missed.
+        await _push_time(client, write_lock)
 
         sink.last_notification = time.monotonic()
         last_time_sync = time.monotonic()
@@ -312,7 +381,7 @@ async def _session(device: BLEDevice, sink: ReadingSink) -> None:
                 break
 
             if now - last_time_sync >= config.BLE_TIME_SYNC_INTERVAL:
-                await _push_time(client)
+                await _push_time(client, write_lock)
                 last_time_sync = now
 
             if now - last_report >= 60:
@@ -325,6 +394,13 @@ async def _session(device: BLEDevice, sink: ReadingSink) -> None:
                 )
                 last_report = now
 
+        worker.cancel()
+        try:
+            # Collect the cancellation so it is not reported as an unretrieved
+            # task exception on shutdown.
+            await worker
+        except (asyncio.CancelledError, Exception):
+            pass
         try:
             await client.stop_notify(proto.CHAR_DATA_UUID)
         except Exception:
