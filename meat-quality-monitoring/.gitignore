@@ -63,3 +63,7 @@ tmp/
 # Captured images (large binary files)
 images/capture_*.jpg
 images/rpicam_test_*.jpg
+
+# Runtime artifacts
+*.pid
+captures/

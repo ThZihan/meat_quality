@@ -3,9 +3,9 @@
 IoT Meat Monitor — Raspberry Pi Background Client
 
 Runs as a systemd service. Implements the full data recovery strategy:
-  1. Reads last_seen_id from local bookmark file
+  1. Reads the last timestamp/ID cursor from a local bookmark file
   2. On startup: catches up on all missed readings via /history
-  3. During normal operation: polls /current every 5 seconds
+  3. During normal operation: polls recent /history every 5 seconds
   4. Updates bookmark after each successfully processed reading
   5. Retries with exponential backoff on failures
 
@@ -19,7 +19,7 @@ import sys
 import time
 
 import config
-from api_client import load_bookmark, save_bookmark, catch_up, poll_current
+from api_client import load_bookmark, catch_up, poll_current
 
 # Configure logging
 logging.basicConfig(
@@ -60,7 +60,11 @@ def main():
     logger.info("Bookmark: %s", bookmark)
 
     # 2. Catch up on any missed readings
-    bookmark = catch_up(bookmark)
+    try:
+        bookmark = catch_up(bookmark)
+    except Exception as e:
+        # A temporary API outage at startup must not terminate the service.
+        logger.error("Initial catch-up failed; entering poll mode: %s", e)
 
     # 3. Enter normal polling mode
     logger.info(
@@ -74,11 +78,9 @@ def main():
 
             if new_bookmark != bookmark:
                 bookmark = new_bookmark
-                consecutive_failures = 0
-            else:
-                # poll_current returned same bookmark — could be same reading or failure
-                # Check if it was a failure by testing connection
-                pass
+            # A normal return means the API poll succeeded, even if there was
+            # no reading newer than the bookmark.
+            consecutive_failures = 0
 
         except Exception as e:
             logger.error("Error in poll cycle: %s", e)
@@ -92,9 +94,11 @@ def main():
             try:
                 bookmark = load_bookmark()
                 bookmark = catch_up(bookmark)
+                consecutive_failures = 0
             except Exception as e:
                 logger.error("Catch-up retry failed: %s", e)
-            consecutive_failures = 0
+                # Avoid hammering a failed endpoint with catch-up every cycle.
+                consecutive_failures = 0
 
         time.sleep(config.SENSOR_API_POLL_INTERVAL)
 

@@ -27,7 +27,7 @@ SENSOR_API_BASE = os.environ.get(
     "https://meat-monitor.kalobiral.com.bd/api/meat-data"
 )
 SENSOR_API_KEY = os.environ.get("SENSOR_API_KEY", "")
-SENSOR_API_TIMEOUT = int(os.environ.get("SENSOR_API_TIMEOUT", "10"))  # seconds
+SENSOR_API_TIMEOUT = int(os.environ.get("SENSOR_API_TIMEOUT", "5"))  # seconds (10s used to stall page reruns when the hotspot flaps)
 
 # Device identifier used as a query parameter for /current, /latest, /history
 SENSOR_API_DEVICE_ID = os.environ.get("SENSOR_API_DEVICE_ID", "ESP32-MeatMonitor")
@@ -38,6 +38,15 @@ SENSOR_API_MAX_RETRIES = int(os.environ.get("SENSOR_API_MAX_RETRIES", "3"))  # r
 SENSOR_API_RETRY_BASE_DELAY = int(os.environ.get("SENSOR_API_RETRY_BASE_DELAY", "2"))  # seconds (doubles each retry)
 SENSOR_API_HISTORY_LIMIT = int(os.environ.get("SENSOR_API_HISTORY_LIMIT", "5000"))  # max readings per /history call
 SENSOR_API_CATCHUP_FAILURE_THRESHOLD = int(os.environ.get("SENSOR_API_CATCHUP_FAILURE_THRESHOLD", "5"))  # consecutive failures before re-catch-up
+# Bound history queries to a recent window when a bookmark is missing or stale.
+# This also recovers safely if the server database is restored and numeric IDs
+# restart below the Pi's previous bookmark.
+SENSOR_API_RECOVERY_LOOKBACK_HOURS = int(
+    os.environ.get("SENSOR_API_RECOVERY_LOOKBACK_HOURS", "24")
+)
+SENSOR_API_DASHBOARD_HISTORY_LIMIT = int(
+    os.environ.get("SENSOR_API_DASHBOARD_HISTORY_LIMIT", "100")
+)
 
 # Bookmark file — tracks last seen reading ID for recovery
 BOOKMARK_FILE = os.path.expanduser(
@@ -110,7 +119,7 @@ HUMIDITY_WARNING_HIGH = 90.0  # Warning threshold for high humidity
 
 # Data Display Settings
 MAX_HISTORY_READINGS = 1000  # Maximum number of readings to keep in memory
-CHART_REFRESH_INTERVAL = 1  # Dashboard refresh interval in seconds (reduced from 2 for faster updates)
+CHART_REFRESH_INTERVAL = 5  # Dashboard refresh interval in seconds (1s full-script reruns overloaded the Pi and made page loads crawl)
 AUTO_REFRESH_ENABLED = True  # Enable automatic dashboard refresh for real-time data updates
 
 # Visualization Settings

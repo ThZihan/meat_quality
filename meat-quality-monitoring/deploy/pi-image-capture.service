@@ -1,6 +1,8 @@
 [Unit]
-Description=Continuous Raspberry Pi image capture
-After=local-fs.target
+Description=Timed Camera Module 3 high-resolution image capture
+Requires=pi-camera-feed.service
+After=local-fs.target network-online.target pi-camera-feed.service
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -8,8 +10,11 @@ User=zihan
 WorkingDirectory=/home/zihan/projects/meat-quality-monitoring
 Environment=PENDING_SYNC_DIR=/home/zihan/pending_sync
 Environment=SYNC_DB_PATH=/home/zihan/sync_state.db
+Environment=CAMERA_CAPTURE_URL=http://127.0.0.1:5000/capture_highres
+Environment=CAMERA_CAPTURE_HTTP_TIMEOUT=30
+Environment=PYTHONUNBUFFERED=1
 ExecStartPre=/bin/mkdir -p /home/zihan/pending_sync
-ExecStart=/home/zihan/projects/meat-quality-monitoring/venv/bin/python3 /home/zihan/projects/meat-quality-monitoring/capture.py
+ExecStart=/home/zihan/projects/meat-quality-monitoring/venv/bin/python3 /home/zihan/projects/meat-quality-monitoring/capture.py --interval 30
 Restart=always
 RestartSec=5
 StandardOutput=journal

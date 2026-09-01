@@ -26,7 +26,13 @@ import config
 from api_client import get_api_client
 from mqtt_client_simple import map_quality_level, determine_gas_status
 from db_manager import get_db_manager
-from mock_data import get_time_elapsed, get_fusion_decision, get_readings
+from mock_data import (
+    get_time_elapsed,
+    get_fusion_decision,
+    get_readings,
+    reset_simulation,
+    predict_image,
+)
 from camera import (
     get_camera_image_bytes,
     list_available_cameras,
@@ -328,21 +334,75 @@ with st.sidebar:
     # API Connection Status & Background Service Info
     if st.session_state.data_mode == 'api':
         api_client = get_api_client()
-        
-        # Show background service bookmark info
+
+        # Show background service bookmark info, with REAL freshness check.
+        # A green "active" status is only shown if the latest local reading is
+        # recent (within the freshness window). Otherwise we surface a clear
+        # warning so a dead/unreachable remote server is never silently hidden.
+        STALE_WARNING_HOURS = 2  # readings older than this are considered stale
+
         bookmark = api_client.get_bookmark_info()
-        if bookmark.get("last_id", 0) > 0:
+        db = get_db_manager()
+        latest = db.get_latest_reading()
+
+        data_is_fresh = False
+        age_description = "No local data yet"
+        if latest:
+            try:
+                last_ts = pd.to_datetime(latest['timestamp'], utc=True)
+                age_seconds = (pd.Timestamp.now(tz='UTC') - last_ts).total_seconds()
+                data_is_fresh = age_seconds < (STALE_WARNING_HOURS * 3600)
+                if age_seconds < 60:
+                    age_description = f"{int(age_seconds)}s ago"
+                elif age_seconds < 3600:
+                    age_description = f"{int(age_seconds // 60)}m ago"
+                else:
+                    age_description = f"{age_seconds / 3600:.1f}h ago"
+            except Exception:
+                data_is_fresh = False
+
+        if bookmark.get("last_id", 0) > 0 and latest and data_is_fresh:
             st.success("✅ Sensor Data Active")
-            st.caption(f"Last reading ID: {bookmark['last_id']}")
+            st.caption(f"Last reading: {age_description} (ID {bookmark['last_id']})")
+        elif latest:
+            st.warning(f"⚠️ Data is stale — last reading {age_description}")
+            st.caption(
+                f"Last local ID: {bookmark.get('last_id', '?')} · "
+                "The background client keeps retrying the remote server. "
+                "If this stays stale, the server is unreachable/down."
+            )
         else:
             st.warning("⚠️ No data yet")
             st.caption("Start the background client to fetch data.")
-        
-        # Test connection button
+
+        # Live server reachability test (quick, cached via session state).
+        # Runs at most once per minute so it never blocks the auto-refresh.
+        if 'last_server_check' not in st.session_state:
+            st.session_state.last_server_check = 0
+            st.session_state.server_reachable = None
+
+        import time as _time_mod
+        if _time_mod.time() - st.session_state.last_server_check > 60:
+            st.session_state.server_reachable = api_client.fetch_current() is not None
+            st.session_state.last_server_check = _time_mod.time()
+
+        if st.session_state.server_reachable is False:
+            st.error(
+                f"🔴 Remote server unreachable: {config.SENSOR_API_BASE}\n\n"
+                "New sensor data cannot be fetched and images cannot be "
+                "uploaded until the server is back online. The dashboard "
+                "continues to work with locally stored data."
+            )
+        elif st.session_state.server_reachable is True:
+            st.caption("🟢 Remote server is reachable.")
+
+        # Manual Test connection button
         if st.button("🔄 Test API Connection"):
+            st.session_state.last_server_check = _time_mod.time()
             reading = api_client.fetch_current()
             if reading is not None:
                 st.session_state.api_connected = True
+                st.session_state.server_reachable = True
                 st.success("Connection successful!")
                 st.json({
                     "temperature": reading.get("temperature"),
@@ -353,6 +413,7 @@ with st.sidebar:
                     "quality": reading.get("quality"),
                 })
             else:
+                st.session_state.server_reachable = False
                 st.error(f"Connection failed: {api_client.last_error}")
     
     st.divider()
@@ -587,12 +648,26 @@ def run_sync_now() -> tuple[bool, str]:
     return run_privileged_command([PYTHON_BIN, str(SYNC_SCRIPT_PATH)])
 
 
+# Minimum size (in bytes) for a file to be considered a valid captured image.
+# Empty/near-empty files (e.g. created when the camera is unplugged) are skipped
+# so they never get counted as "pending" or fed to st.image (which would crash).
+MIN_VALID_IMAGE_BYTES = 1024
+
+
+def _is_valid_image_file(file_path: Path) -> bool:
+    """Return True if the file exists and is large enough to be a real image."""
+    try:
+        return file_path.is_file() and file_path.stat().st_size >= MIN_VALID_IMAGE_BYTES
+    except OSError:
+        return False
+
+
 def get_sync_state_summary() -> dict:
     """Collect pending directory and SQLite ledger status for the UI."""
     pending_files = []
     if PENDING_SYNC_DIR.exists():
         pending_files = sorted(
-            [file_path for file_path in PENDING_SYNC_DIR.iterdir() if file_path.is_file()],
+            [file_path for file_path in PENDING_SYNC_DIR.iterdir() if _is_valid_image_file(file_path)],
             key=lambda file_path: file_path.stat().st_mtime,
             reverse=True,
         )
@@ -669,30 +744,44 @@ def capture_dashboard_image() -> tuple[bool, str]:
 # Update data (Mock or API)
 if st.session_state.data_mode == 'mock' and st.session_state.simulation_running:
     current_time = time.time()
-    
-    # Update every 2 seconds
+
+    # Update on each refresh interval
     if current_time - st.session_state.last_update >= config.CHART_REFRESH_INTERVAL:
         readings = get_readings(room_temp, humidity)
-        
+
         # Add to history
         new_row = pd.DataFrame([{
             'timestamp': pd.Timestamp.now(),
             'h2s_ppm': readings['h2s_ppm'],
-            'nh3_ppm': readings['ammonia_ppm'],  # Map ammonia to nh3
-            'voc_ppm': readings['methane_ppm'],  # Map methane to voc for display
+            'nh3_ppm': readings['nh3_ppm'],
+            'voc_ppm': readings['voc_ppm'],
             'temp_c': readings['temp_c'],
             'humidity': readings['humidity'],
             'quality_level': 'UNKNOWN'
         }])
-        
+
         st.session_state.history = pd.concat([st.session_state.history, new_row], ignore_index=True)
-        
+
         # Keep only last 1000 readings
         if len(st.session_state.history) > config.MAX_HISTORY_READINGS:
             st.session_state.history = st.session_state.history.tail(config.MAX_HISTORY_READINGS).reset_index(drop=True)
-        
+
         st.session_state.last_update = current_time
         st.rerun()
+
+elif st.session_state.data_mode == 'mock' and len(st.session_state.history) == 0:
+    # Seed a single realistic reading so the dashboard shows live, randomised
+    # values immediately when entering Mock mode (before pressing "Start").
+    readings = get_readings(room_temp, humidity)
+    st.session_state.history = pd.DataFrame([{
+        'timestamp': pd.Timestamp.now(),
+        'h2s_ppm': readings['h2s_ppm'],
+        'nh3_ppm': readings['nh3_ppm'],
+        'voc_ppm': readings['voc_ppm'],
+        'temp_c': readings['temp_c'],
+        'humidity': readings['humidity'],
+        'quality_level': 'UNKNOWN'
+    }])
 
 elif st.session_state.data_mode == 'api':
     # Load data from local database (background service handles API fetching)
@@ -767,14 +856,14 @@ with left_col:
     if st.session_state.data_mode == 'mock':
         col_btn1, col_btn2 = st.columns(2)
         with col_btn1:
-            if st.button("📷 Load Dummy Capture"):
+            if st.button("📷 Load Sample Capture"):
                 try:
-                    with open("images/dummyImg.png", "rb") as f:
+                    with open("images/sample_meat.png", "rb") as f:
                         st.session_state.uploaded_image_bytes = f.read()
                     st.session_state.uploaded_image = None
-                    st.success("Dummy image loaded for simulation!")
+                    st.success("Sample image loaded for simulation!")
                 except FileNotFoundError:
-                    st.error("Dummy image not found. Please ensure images/dummyImg.png exists.")
+                    st.error("Sample image not found. Please ensure images/sample_meat.png exists.")
 
         with col_btn2:
             if st.button("🔄 Clear Image"):
@@ -889,18 +978,39 @@ with left_col:
         # Display image from session state (persists across reruns)
         st.image(st.session_state.uploaded_image_bytes, width='stretch', caption="Captured from Camera")
     elif st.session_state.data_mode == 'api' and sync_state_summary and sync_state_summary['latest_pending_path']:
-        st.image(
-            str(sync_state_summary['latest_pending_path']),
-            width='stretch',
-            caption=f"Latest pending capture: {sync_state_summary['latest_pending_path'].name}"
-        )
+        latest_pending_path = sync_state_summary['latest_pending_path']
+        # Validate the file is a real, decodable image before displaying it.
+        # Empty/corrupt files (e.g. from an unplugged camera) must not crash
+        # the dashboard via PIL.UnidentifiedImageError.
+        valid_for_display = False
+        try:
+            if _is_valid_image_file(latest_pending_path):
+                from PIL import Image as _PILImage
+                with _PILImage.open(latest_pending_path) as _img:
+                    _img.verify()  # raises if the file is not a valid image
+                valid_for_display = True
+        except Exception:
+            valid_for_display = False
+
+        if valid_for_display:
+            st.image(
+                str(latest_pending_path),
+                width='stretch',
+                caption=f"Latest pending capture: {latest_pending_path.name}"
+            )
+        else:
+            st.warning(
+                f"The latest pending file ({latest_pending_path.name}) is empty or "
+                f"not a valid image. This usually means the camera is unplugged or "
+                f"failed during capture. Plug in the camera and capture a new image."
+            )
     else:
         if st.session_state.data_mode == 'api':
             st.info(
                 "Use Start Capturing to run the background service, or Load Latest Capture to preview the newest image waiting in /home/pi/pending_sync."
             )
         else:
-            st.info("Upload an image or load a dummy capture to start visual analysis.")
+            st.info("Upload an image or load a sample capture to start visual analysis.")
     
     # CNN Prediction
     st.markdown("### CNN Prediction Results")
@@ -908,14 +1018,10 @@ with left_col:
     if st.session_state.uploaded_image_bytes is not None:
         if st.session_state.simulation_running or st.button("🔍 Run CNN Prediction"):
             if st.session_state.data_mode == 'mock':
-                # Use dummy prediction for mock mode
-                prediction = {
-                    'species': 'Beef',
-                    'visual_status': 'Fresh',
-                    'confidence': '92.5%'
-                }
+                # Randomised mock prediction (species / freshness / confidence
+                # differ on every run, and spoilage probability grows over time)
+                prediction = predict_image()
                 st.session_state.visual_prediction = prediction
-                st.info("Showing dummy prediction for simulation mode.")
             else:
                 # Use actual CNN prediction for API mode
                 prediction = predict_image()

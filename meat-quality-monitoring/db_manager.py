@@ -67,16 +67,26 @@ class DatabaseManager:
                     quality_level TEXT NOT NULL,
                     wifi_rssi INTEGER,
                     sensor_status TEXT,
+                    received_at DATETIME,
                     UNIQUE(source_id)
                 )
             ''')
 
-            # Migration: add source_id column to pre-existing databases.
-            try:
-                cursor.execute('SELECT source_id FROM sensor_readings LIMIT 1')
-            except Exception:
+            # Migrations for pre-existing databases.
+            existing_columns = {
+                row[1] for row in cursor.execute('PRAGMA table_info(sensor_readings)')
+            }
+            if 'source_id' not in existing_columns:
                 cursor.execute('ALTER TABLE sensor_readings ADD COLUMN source_id TEXT')
-                cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_sensor_source ON sensor_readings(source_id)')
+            if 'received_at' not in existing_columns:
+                cursor.execute('ALTER TABLE sensor_readings ADD COLUMN received_at DATETIME')
+
+            # Empty strings are not useful IDs and collide under a UNIQUE index.
+            cursor.execute("UPDATE sensor_readings SET source_id = NULL WHERE source_id = ''")
+            cursor.execute(
+                'CREATE UNIQUE INDEX IF NOT EXISTS idx_sensor_source '
+                'ON sensor_readings(source_id)'
+            )
             
             # Visual predictions table
             cursor.execute('''
@@ -130,52 +140,76 @@ class DatabaseManager:
         Returns:
             The ID of the inserted row
         """
+        conn = None
+        cursor = None
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                
-                # Parse timestamp
-                if isinstance(data['timestamp'], str):
-                    timestamp = datetime.fromisoformat(data['timestamp'].replace('Z', '+00:00'))
-                elif isinstance(data['timestamp'], (int, float)):
-                    timestamp = datetime.fromtimestamp(data['timestamp'] / 1000)
-                else:
-                    timestamp = datetime.now()
-                
-                # Serialize sensor status if present
-                sensor_status = json.dumps(data.get('sensor_status', {}))
-                
-                # INSERT OR IGNORE: if source_id already exists (UNIQUE constraint),
-                # the duplicate is silently skipped — no error, no duplicate row.
-                cursor.execute('''
-                    INSERT OR IGNORE INTO sensor_readings
-                    (timestamp, device_id, source_id, temperature, humidity, mq135_co2, mq136_h2s, mq137_nh3, quality_level, wifi_rssi, sensor_status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    timestamp,
-                    data['device_id'],
-                    data.get('source_id'),
-                    data['temperature'],
-                    data['humidity'],
-                    data['mq135_co2'],
-                    data['mq136_h2s'],
-                    data['mq137_nh3'],
-                    data['quality_level'],
-                    data.get('wifi_rssi'),
-                    sensor_status
-                ))
-                
-                conn.commit()
-                row_id = cursor.lastrowid
-                if row_id and cursor.rowcount > 0:
-                    logger.debug(f"Inserted sensor reading with ID: {row_id}")
-                else:
-                    logger.debug(f"Duplicate reading skipped (source_id={data.get('source_id', 'N/A')})")
-                return row_id
-                
+            # sqlite3.Connection's context manager commits/rolls back but does
+            # not close the connection. Close explicitly so a long-running
+            # polling service cannot accumulate database file descriptors.
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            # Parse timestamp
+            if isinstance(data['timestamp'], str):
+                timestamp = datetime.fromisoformat(data['timestamp'].replace('Z', '+00:00'))
+            elif isinstance(data['timestamp'], (int, float)):
+                timestamp = datetime.fromtimestamp(data['timestamp'] / 1000)
+            elif isinstance(data['timestamp'], datetime):
+                timestamp = data['timestamp']
+            else:
+                timestamp = datetime.now()
+
+            received_at = data.get('received_at')
+            if isinstance(received_at, str):
+                received_at = datetime.fromisoformat(received_at.replace('Z', '+00:00'))
+            elif not isinstance(received_at, datetime):
+                received_at = None
+
+            # Serialize sensor status if present
+            sensor_status = json.dumps(data.get('sensor_status', {}))
+
+            # INSERT OR IGNORE: if source_id already exists (UNIQUE constraint),
+            # the duplicate is silently skipped — no error, no duplicate row.
+            cursor.execute('''
+                INSERT OR IGNORE INTO sensor_readings
+                (timestamp, received_at, device_id, source_id, temperature, humidity, mq135_co2, mq136_h2s, mq137_nh3, quality_level, wifi_rssi, sensor_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                timestamp,
+                received_at,
+                data['device_id'],
+                data.get('source_id') or None,
+                data['temperature'],
+                data['humidity'],
+                data['mq135_co2'],
+                data['mq136_h2s'],
+                data['mq137_nh3'],
+                data['quality_level'],
+                data.get('wifi_rssi'),
+                sensor_status
+            ))
+
+            conn.commit()
+            row_id = cursor.lastrowid if cursor.rowcount > 0 else 0
+            if row_id:
+                logger.debug(f"Inserted sensor reading with ID: {row_id}")
+            else:
+                logger.debug(f"Duplicate reading skipped (source_id={data.get('source_id', 'N/A')})")
+            return row_id
+
         except Exception as e:
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except sqlite3.Error:
+                    pass
             logger.error(f"Error inserting sensor reading: {e}")
             raise
+        finally:
+            if cursor is not None:
+                cursor.close()
+            if conn is not None:
+                conn.close()
     
     def insert_visual_prediction(self, data: Dict) -> int:
         """

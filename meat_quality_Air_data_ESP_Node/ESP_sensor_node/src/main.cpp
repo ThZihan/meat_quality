@@ -1,3 +1,4 @@
+
 /*
  * MQ135 + MQ136 + MQ137 Air Quality Sensor for ESP32 NodeMCU
  * HTTP API Version — Offline Queue + SoftAP WiFi Portal + EEPROM
@@ -30,18 +31,18 @@
  * - MQ136: H2S, NH3, CO
  * - MQ137: NH3 (specialized ammonia detection)
  *
- * CIRCUIT WIRING (Voltage Dividers for 5V → 3.3V):
- * =================================================
- * VOLTAGE DIVIDER (4.7k upper, 9k lower):
- * MQxxx AOUT ────[4.7kΩ]───┬───[9kΩ]─── GND
- *                            │
- *                            └─── ESP32 GPIO
+ * CIRCUIT WIRING (Voltage Dividers for 5V → ESP32 ADC):
+ * ======================================================
+ * MQxxx AOUT ────[68kΩ]────┬──── ESP32 GPIO
+ *                           ├────[100nF / 104]──── GND
+ *                           └────[100kΩ]────────── GND
  *
  * Voltage Divider Calculation:
  * - Input: 0-5V from MQ sensors
- * - Output: 0-3.28V to ESP32 (safe for 3.3V logic)
- * - Formula: Vout = Vin × (9k / 13.7k) = Vin × 0.657
- * - Correction: Multiply by 1.5222 to get actual sensor voltage
+ * - Output: 0-2.976V to ESP32 (safe for 3.3V ADC)
+ * - Formula: Vadc = Vaout × (100k / (68k + 100k)) = Vaout × 0.595238
+ * - Correction: Vaout = Vadc × 1.68
+ * - The 104 ceramic capacitor is a 100nF low-pass/noise filter.
  */
 
 #include <Arduino.h>
@@ -52,7 +53,7 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
-#include <Adafruit_AHTX0.h>
+#include <Adafruit_BME280.h>
 #include <time.h>
 #include <EEPROM.h>
 
@@ -69,11 +70,13 @@
 const char* API_URL   = "https://meat-monitor.kalobiral.com.bd/api/meat-data";
 const char* DEVICE_ID = "ESP32-MeatMonitor";
 
-// AHT10 I2C temperature/humidity sensor
-const int I2C_SDA = 21;
-const int I2C_SCL = 22;
-Adafruit_AHTX0 aht;
-bool ahtReady = false;
+// BME280 I2C temperature/humidity/pressure sensor (replaced AHT10)
+// GPIO21 remained electrically stuck LOW on this ESP32, so the bus was moved
+// to a verified free pin pair. ESP32 I2C supports remapping to these GPIOs.
+const int I2C_SDA = 25;
+const int I2C_SCL = 26;
+Adafruit_BME280 bme;
+bool bmeReady = false;
 
 // SoftAP Config Portal (password from secrets.h)
 const char* AP_SSID     = "ESP32-Setup";
@@ -98,12 +101,22 @@ const int JSON_BUF_SIZE   = 512;
 const int MQ135_PIN = 34;  // ADC1_CH6
 const int MQ136_PIN = 35;  // ADC1_CH7
 const int MQ137_PIN = 32;  // ADC1_CH4
-const float VOLTAGE_DIVIDER_RATIO = 1.5222;  // 4.7k upper, 9k lower
+const float DIVIDER_UPPER_OHMS = 68000.0;    // MQ AOUT → ADC node
+const float DIVIDER_LOWER_OHMS = 100000.0;  // ADC node → GND
+const float VOLTAGE_DIVIDER_RATIO =
+    (DIVIDER_UPPER_OHMS + DIVIDER_LOWER_OHMS) / DIVIDER_LOWER_OHMS;  // 1.68
 const float ESP32_VREF = 3.3;
 const int ADC_RESOLUTION = 4095;
+const int ADC_SAMPLE_COUNT = 32;
 
-// MQ Sensor Parameters
-const float RL = 10000.0;  // 10kΩ load resistor
+// MQ Sensor parameters. The external divider branch (68k + 100k) is connected
+// from module AOUT to GND, in parallel with the module's nominal 10k load.
+// Rs must therefore use the effective load, not 10k alone.
+const float MQ_MODULE_RL_OHMS = 10000.0;
+const float DIVIDER_BRANCH_OHMS = DIVIDER_UPPER_OHMS + DIVIDER_LOWER_OHMS;
+const float EFFECTIVE_RL_OHMS =
+    (MQ_MODULE_RL_OHMS * DIVIDER_BRANCH_OHMS) /
+    (MQ_MODULE_RL_OHMS + DIVIDER_BRANCH_OHMS);  // 9438.20Ω
 
 // R0 values from 24-hour burn-in calibration
 const float MQ135_R0 = 193200.00;
@@ -132,6 +145,8 @@ const float MQ137_NH3_B = -2.473;
 // FORWARD DECLARATIONS
 // ═══════════════════════════════════════════════════════════════
 int httpPostJson(const char* jsonPayload);
+void initBME280();
+void deepI2CDiagnostics();
 
 // ═══════════════════════════════════════════════════════════════
 // GLOBAL STATE
@@ -309,15 +324,15 @@ void buildSensorJson(char* buf, float mq135_vocPPM, float mq135_nh3PPM,
 
     // Sensors
     JsonObject sensors = doc.createNestedObject("sensors");
-    // Read real temperature/humidity from AHT10 if available, else fallback.
-    if (ahtReady) {
-        sensors_event_t humEvent, tempEvent;
-        aht.getEvent(&humEvent, &tempEvent);
-        sensors["temperature"] = (float)tempEvent.temperature;
-        sensors["humidity"]    = (float)humEvent.relative_humidity;
+    // Read real temperature/humidity/pressure from BME280 if available, else fallback.
+    if (bmeReady) {
+        sensors["temperature"] = bme.readTemperature();
+        sensors["humidity"]    = bme.readHumidity();
+        sensors["pressure"]    = bme.readPressure() / 100.0F;  // Pa → hPa
     } else {
         sensors["temperature"] = 25.0;
         sensors["humidity"]    = 60.0;
+        sensors["pressure"]    = 1013.25;
     }
     sensors["mq135_co2"]   = mq135_vocPPM;
     sensors["mq136_h2s"]   = mq136_h2sPPM;
@@ -329,7 +344,10 @@ void buildSensorJson(char* buf, float mq135_vocPPM, float mq135_nh3PPM,
 
     doc["wifi_rssi"] = WiFi.RSSI();
 
-    doc.createNestedObject("sensor_status");
+    JsonObject sensorStatus = doc.createNestedObject("sensor_status");
+    sensorStatus["bme280"] = bmeReady ? "ok" : "not_detected";
+    sensorStatus["mq_divider"] = "68k_100k_100nF";
+    sensorStatus["mq_calibration"] = "required_after_hardware_change";
 
     serializeJson(doc, buf, JSON_BUF_SIZE);
 }
@@ -598,7 +616,7 @@ bool connectWiFi(const char* ssid, const char* pass, int timeoutMs = 15000) {
 
 float calculateRS(float voltage) {
     if (voltage <= 0) return 0;
-    return ((5.0 - voltage) / voltage) * RL;
+    return ((5.0 - voltage) / voltage) * EFFECTIVE_RL_OHMS;
 }
 
 float calculatePPM(float rs, float a, float b, float r0) {
@@ -607,9 +625,295 @@ float calculatePPM(float rs, float a, float b, float r0) {
     return pow((ratio / a), (1.0 / b));
 }
 
+// The 68k/100k divider has a relatively high source impedance. The 100nF
+// capacitor stabilizes the node; discarding one conversion and averaging 32
+// conversions reduces ESP32 ADC mux/sample-and-hold noise substantially.
+int readFilteredADC(int pin) {
+    analogRead(pin);  // discard first sample after ADC channel switch
+    delayMicroseconds(500);
+
+    uint32_t sum = 0;
+    for (int i = 0; i < ADC_SAMPLE_COUNT; i++) {
+        sum += analogRead(pin);
+        delayMicroseconds(250);
+    }
+    return (int)((sum + ADC_SAMPLE_COUNT / 2) / ADC_SAMPLE_COUNT);
+}
+
 // ═══════════════════════════════════════════════════════════════
 // SETUP
 // ═══════════════════════════════════════════════════════════════
+
+const char* i2cErrorName(uint8_t error) {
+    switch (error) {
+        case 0: return "ACK";
+        case 1: return "data-too-long";
+        case 2: return "address-NACK";
+        case 3: return "data-NACK";
+        case 4: return "other-error";
+        case 5: return "timeout";
+        default: return "unknown";
+    }
+}
+
+bool readI2CRegister(uint8_t address, uint8_t reg, uint8_t& value) {
+    Wire.beginTransmission(address);
+    Wire.write(reg);
+    uint8_t error = Wire.endTransmission(false);
+    if (error != 0 || Wire.requestFrom(address, (uint8_t)1) != 1) {
+        return false;
+    }
+    value = Wire.read();
+    return true;
+}
+
+uint8_t scanHardwareI2C(bool printNoDevices = true) {
+    uint8_t found = 0;
+    for (uint8_t address = 1; address < 127; address++) {
+        Wire.beginTransmission(address);
+        if (Wire.endTransmission() == 0) {
+            Serial.printf("  [I2C-HW] ACK at 0x%02X", address);
+            if (address == 0x76 || address == 0x77) {
+                uint8_t id = 0;
+                if (readI2CRegister(address, 0xD0, id)) {
+                    if (id == 0x60)      Serial.print(F(" → BME280 chip ID 0x60"));
+                    else if (id == 0x58) Serial.print(F(" → BMP280 chip ID 0x58 (no humidity)"));
+                    else if (id == 0x61) Serial.print(F(" → BME680/BME688 chip ID 0x61"));
+                    else                 Serial.printf(" → unknown chip ID 0x%02X", id);
+                }
+            }
+            Serial.println();
+            found++;
+        }
+    }
+    if (found == 0 && printNoDevices) {
+        Serial.println(F("  [I2C-HW] No address acknowledged"));
+    }
+    return found;
+}
+
+void releaseI2CLine(int pin) {
+    pinMode(pin, INPUT_PULLUP);  // open-drain release with weak ESP32 pull-up
+}
+
+void driveI2CLineLow(int pin) {
+    pinMode(pin, OUTPUT_OPEN_DRAIN);
+    digitalWrite(pin, LOW);
+}
+
+bool waitI2CLineHigh(int pin, uint32_t timeoutUs = 3000) {
+    uint32_t start = micros();
+    while (digitalRead(pin) == LOW && (uint32_t)(micros() - start) < timeoutUs) {
+        delayMicroseconds(2);
+    }
+    return digitalRead(pin) == HIGH;
+}
+
+// Bit-banged address probe bypasses the ESP32 Wire peripheral entirely. This
+// distinguishes a Wire-driver problem from an electrical/module problem.
+bool softwareI2CProbe(uint8_t address, int sdaPin, int sclPin) {
+    releaseI2CLine(sdaPin);
+    releaseI2CLine(sclPin);
+    delayMicroseconds(20);
+    if (!waitI2CLineHigh(sclPin) || digitalRead(sdaPin) == LOW) return false;
+
+    // START
+    driveI2CLineLow(sdaPin);
+    delayMicroseconds(10);
+    driveI2CLineLow(sclPin);
+
+    uint8_t byteToSend = (uint8_t)(address << 1);  // write address
+    for (int bit = 7; bit >= 0; bit--) {
+        if (byteToSend & (1U << bit)) releaseI2CLine(sdaPin);
+        else                          driveI2CLineLow(sdaPin);
+        delayMicroseconds(5);
+        releaseI2CLine(sclPin);
+        if (!waitI2CLineHigh(sclPin)) return false;
+        delayMicroseconds(10);
+        driveI2CLineLow(sclPin);
+    }
+
+    // ACK bit
+    releaseI2CLine(sdaPin);
+    delayMicroseconds(5);
+    releaseI2CLine(sclPin);
+    if (!waitI2CLineHigh(sclPin)) return false;
+    delayMicroseconds(10);
+    bool acknowledged = digitalRead(sdaPin) == LOW;
+    driveI2CLineLow(sclPin);
+
+    // STOP
+    driveI2CLineLow(sdaPin);
+    delayMicroseconds(5);
+    releaseI2CLine(sclPin);
+    waitI2CLineHigh(sclPin);
+    delayMicroseconds(10);
+    releaseI2CLine(sdaPin);
+    delayMicroseconds(10);
+    return acknowledged;
+}
+
+void recoverI2CBus(int sdaPin, int sclPin) {
+    releaseI2CLine(sdaPin);
+    releaseI2CLine(sclPin);
+    delayMicroseconds(20);
+
+    // Up to 18 clocks releases a slave left mid-byte after a reset/brownout.
+    for (int pulse = 0; pulse < 18 && digitalRead(sdaPin) == LOW; pulse++) {
+        driveI2CLineLow(sclPin);
+        delayMicroseconds(10);
+        releaseI2CLine(sclPin);
+        waitI2CLineHigh(sclPin);
+        delayMicroseconds(10);
+    }
+
+    // Generate a legal STOP condition.
+    driveI2CLineLow(sclPin);
+    driveI2CLineLow(sdaPin);
+    delayMicroseconds(10);
+    releaseI2CLine(sclPin);
+    waitI2CLineHigh(sclPin);
+    delayMicroseconds(10);
+    releaseI2CLine(sdaPin);
+    delayMicroseconds(20);
+}
+
+void deepI2CDiagnostics() {
+    Serial.println(F("\n[I2C-DEEP] Starting electrical + software/hardware diagnostics"));
+    bmeReady = false;
+    Wire.end();
+    delay(20);
+
+    // Check whether the breakout supplies external pull-ups. INPUT_PULLDOWN is
+    // only a qualitative test; strong breakout pull-ups generally remain HIGH.
+    pinMode(I2C_SDA, INPUT);
+    pinMode(I2C_SCL, INPUT);
+    delay(10);
+    int rawSda = digitalRead(I2C_SDA);
+    int rawScl = digitalRead(I2C_SCL);
+    pinMode(I2C_SDA, INPUT_PULLDOWN);
+    pinMode(I2C_SCL, INPUT_PULLDOWN);
+    delay(10);
+    int downSda = digitalRead(I2C_SDA);
+    int downScl = digitalRead(I2C_SCL);
+    pinMode(I2C_SDA, INPUT_PULLUP);
+    pinMode(I2C_SCL, INPUT_PULLUP);
+    delay(10);
+    int upSda = digitalRead(I2C_SDA);
+    int upScl = digitalRead(I2C_SCL);
+    Serial.printf("  Line levels: floating SDA=%s SCL=%s | pulldown SDA=%s SCL=%s | pullup SDA=%s SCL=%s\n",
+                  rawSda ? "HIGH" : "LOW", rawScl ? "HIGH" : "LOW",
+                  downSda ? "HIGH" : "LOW", downScl ? "HIGH" : "LOW",
+                  upSda ? "HIGH" : "LOW", upScl ? "HIGH" : "LOW");
+    if (!upSda || !upScl) {
+        Serial.println(F("  RESULT: one or both lines are stuck LOW (short, wrong pin, or slave holding bus)"));
+    } else if (!rawSda || !rawScl) {
+        Serial.println(F("  RESULT: external pull-ups are absent/weak; add 4.7k–10k from SDA and SCL to 3.3V"));
+    } else {
+        Serial.println(F("  RESULT: both lines idle HIGH; wiring/pull-ups look electrically plausible"));
+    }
+
+    recoverI2CBus(I2C_SDA, I2C_SCL);
+    Serial.printf("  After recovery: SDA=%s SCL=%s\n",
+                  digitalRead(I2C_SDA) ? "HIGH" : "LOW",
+                  digitalRead(I2C_SCL) ? "HIGH" : "LOW");
+
+    if (digitalRead(I2C_SDA) == LOW || digitalRead(I2C_SCL) == LOW) {
+        Serial.printf("  FINAL ELECTRICAL RESULT: SDA(GPIO%d)=%s, SCL(GPIO%d)=%s\n",
+                      I2C_SDA,
+                      digitalRead(I2C_SDA) ? "HIGH" : "STUCK LOW",
+                      I2C_SCL,
+                      digitalRead(I2C_SCL) ? "HIGH" : "STUCK LOW");
+        Serial.println(F("  Cannot issue valid I2C addresses while a line is LOW; skipping timeout scans."));
+        Serial.println(F("  Disconnect the BME module and rerun command '3' to distinguish module/wiring from ESP pins."));
+        Wire.begin(I2C_SDA, I2C_SCL);
+        Wire.setTimeOut(25);
+        Wire.setClock(100000);
+        Serial.println(F("[I2C-DEEP] Finished (electrical fault)\n"));
+        return;
+    }
+
+    bool soft76 = softwareI2CProbe(0x76, I2C_SDA, I2C_SCL);
+    bool soft77 = softwareI2CProbe(0x77, I2C_SDA, I2C_SCL);
+    bool swapped76 = softwareI2CProbe(0x76, I2C_SCL, I2C_SDA);
+    bool swapped77 = softwareI2CProbe(0x77, I2C_SCL, I2C_SDA);
+    Serial.printf("  Software I2C normal:  0x76=%s 0x77=%s\n", soft76 ? "ACK" : "NACK", soft77 ? "ACK" : "NACK");
+    Serial.printf("  Software I2C swapped: 0x76=%s 0x77=%s\n", swapped76 ? "ACK" : "NACK", swapped77 ? "ACK" : "NACK");
+    if (!soft76 && !soft77 && (swapped76 || swapped77)) {
+        Serial.println(F("  RESULT: SDA/SCL are physically swapped or clone labels are reversed"));
+    }
+
+    // Restore normal hardware I2C and test several speeds.
+    recoverI2CBus(I2C_SDA, I2C_SCL);
+    Wire.begin(I2C_SDA, I2C_SCL);
+    Wire.setTimeOut(25);
+    const uint32_t speeds[] = {10000, 50000, 100000, 400000};
+    for (uint32_t speed : speeds) {
+        Wire.setClock(speed);
+        Wire.beginTransmission(0x76);
+        uint8_t error76 = Wire.endTransmission();
+        Wire.beginTransmission(0x77);
+        uint8_t error77 = Wire.endTransmission();
+        Serial.printf("  Hardware %6lu Hz: 0x76=%s(%u), 0x77=%s(%u)\n",
+                      (unsigned long)speed,
+                      i2cErrorName(error76), error76,
+                      i2cErrorName(error77), error77);
+    }
+    Wire.setClock(100000);
+    scanHardwareI2C();
+    initBME280();
+    Serial.println(F("[I2C-DEEP] Finished\n"));
+}
+
+// Probe BME280 on the I2C bus. Safe to call repeatedly (serial command "2").
+// Diagnostic on failure: scans bus + reads chip-ID register 0xD0
+// (0x60 = BME280, 0x58 = BMP280 silicon — common in clones, no humidity).
+void initBME280() {
+    Serial.printf("[BME280] Probing I2C bus (SDA=GPIO%d SCL=GPIO%d)...\n",
+                  I2C_SDA, I2C_SCL);
+    if (digitalRead(I2C_SDA) == LOW || digitalRead(I2C_SCL) == LOW) {
+        bmeReady = false;
+        Serial.printf("[BME280] Electrical fault before probe: SDA=%s, SCL=%s\n",
+                      digitalRead(I2C_SDA) ? "HIGH" : "STUCK LOW",
+                      digitalRead(I2C_SCL) ? "HIGH" : "STUCK LOW");
+        Serial.println(F("[BME280] No I2C transaction is possible until both lines idle HIGH"));
+        return;
+    }
+    const uint32_t probeSpeeds[] = {10000, 50000, 100000};
+    for (uint32_t speed : probeSpeeds) {
+        Wire.setClock(speed);
+        for (uint8_t address : {0x76, 0x77}) {
+            Wire.beginTransmission(address);
+            if (Wire.endTransmission() != 0) continue;
+
+            uint8_t id = 0;
+            if (readI2CRegister(address, 0xD0, id)) {
+                Serial.printf("[BME280] ACK at 0x%02X, chip ID 0x%02X (%lu Hz)\n",
+                              address, id, (unsigned long)speed);
+                if (id == 0x58) {
+                    Serial.println(F("[BME280] This is BMP280 silicon: temperature/pressure only; humidity is impossible"));
+                }
+            }
+            if (id == 0x60 && bme.begin(address, &Wire)) {
+                bmeReady = true;
+                Wire.setClock(100000);
+                Serial.printf("[BME280] ✓ Initialized at 0x%02X (temp/hum/pressure OK)\n", address);
+                return;
+            }
+        }
+    }
+    Wire.setClock(100000);
+    bmeReady = false;
+    Serial.println(F("[BME280] ✗ Not found — running I2C bus scan..."));
+    uint8_t found = scanHardwareI2C(false);
+    if (found == 0) {
+        Serial.println(F("  [I2C] NO devices ACK on bus"));
+        Serial.printf("  → Check: VCC=3.3V, GND, SDA→GPIO%d, SCL→GPIO%d\n",
+                      I2C_SDA, I2C_SCL);
+        Serial.println(F("  → On 6-pin clone boards also wire CSB→3.3V (enables I2C mode)"));
+    }
+    Serial.println(F("  Using fallback values (25.0C / 60.0% / 1013.25 hPa)"));
+}
 
 void setup() {
     Serial.begin(115200);
@@ -624,15 +928,11 @@ void setup() {
     analogReadResolution(12);
     analogSetAttenuation(ADC_11db);
 
-    // AHT10 temperature/humidity sensor (I2C on GPIO 21/22)
+    // BME280 temperature/humidity/pressure sensor (I2C on GPIO 25/26)
     Wire.begin(I2C_SDA, I2C_SCL);
-    if (aht.begin()) {
-        ahtReady = true;
-        Serial.println(F("[AHT10] Temperature/humidity sensor initialized"));
-    } else {
-        ahtReady = false;
-        Serial.println(F("[AHT10] ✗ Not found — using fallback values (25.0C / 60.0%)"));
-    }
+    Wire.setTimeOut(25);
+    Wire.setClock(100000);  // 100 kHz — safest for clone modules
+    initBME280();
 
     // EEPROM
     EEPROM.begin(EEPROM_SIZE);
@@ -640,12 +940,22 @@ void setup() {
     // Try to load saved credentials
     bool hasCredentials = loadCredentials();
 
+    // Provision station WiFi from the gitignored secrets file on first boot.
+    // Portal-supplied credentials in EEPROM take precedence on later boots.
+    if (!hasCredentials && strlen(WIFI_SSID) > 0) {
+        strncpy(wifi_ssid, WIFI_SSID, sizeof(wifi_ssid) - 1);
+        wifi_ssid[sizeof(wifi_ssid) - 1] = '\0';
+        strncpy(wifi_pass, WIFI_PASSWORD, sizeof(wifi_pass) - 1);
+        wifi_pass[sizeof(wifi_pass) - 1] = '\0';
+        saveCredentials(wifi_ssid, wifi_pass);
+        hasCredentials = true;
+        Serial.print(F("[BOOT] Provisioned WiFi SSID from secrets: "));
+        Serial.println(wifi_ssid);
+    }
+
     if (hasCredentials) {
         Serial.println(F("[BOOT] Found saved credentials. Connecting..."));
         if (connectWiFi(wifi_ssid, wifi_pass)) {
-            // Sync time
-            configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-            Serial.print(F("[NTP] Waiting for time sync..."));
             // Bounded NTP sync — max 30 attempts (~15 s) to avoid hanging
             // indefinitely if NTP servers are unreachable.
             configTime(0, 0, "pool.ntp.org", "time.nist.gov");
@@ -661,47 +971,21 @@ void setup() {
             if (now < 1700000000) {
                 Serial.println(F("\n[NTP] ✗ Sync FAILED (will retry later). Using epoch fallback."));
             } else {
-            struct tm timeinfo;
-            getLocalTime(&timeinfo);
-            Serial.printf("\n[NTP] ✓ Synced: %s\n", asctime(&timeinfo));
+                struct tm timeinfo;
+                getLocalTime(&timeinfo);
+                Serial.printf("\n[NTP] ✓ Synced: %s\n", asctime(&timeinfo));
+            }
         } else {
             Serial.println(F("[BOOT] WiFi connection failed with saved credentials."));
-            Serial.println(F("[BOOT] Type '1' + Enter in Serial Monitor to reconfigure WiFi."));
+            Serial.println(F("[BOOT] Starting WiFi configuration portal..."));
+            startConfigPortal();
         }
     } else {
-        // No EEPROM credentials — use hardcoded defaults and save them
+        // No hardcoded WiFi credentials are embedded in production firmware.
+        // Start the password-protected SoftAP portal so WiFi can be configured.
         Serial.println(F("[BOOT] No saved WiFi credentials."));
-        Serial.println(F("[BOOT] Using hardcoded defaults and saving to EEPROM..."));
-        // No hardcoded WiFi credentials — user must type "1" + Enter to
-        // configure via the SoftAP portal. This prevents credential leakage.
-        Serial.println(F("[BOOT] No saved credentials and no hardcoded defaults."));
-        Serial.println(F("[BOOT] Type '1' + Enter in Serial Monitor to configure WiFi."));
-        return;
-        saveCredentials(wifi_ssid, wifi_pass);
-
-        if (connectWiFi(wifi_ssid, wifi_pass)) {
-            configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-            Serial.print(F("[NTP] Waiting for time sync..."));
-            // Reuse the bounded NTP logic (max 30 attempts).
-            Serial.print(F("[NTP] Waiting for time sync..."));
-            time_t now = time(nullptr);
-            int ntpAttempts = 0;
-            while (now < 1700000000 && ntpAttempts < 30) {
-                delay(500);
-                Serial.print(F("."));
-                now = time(nullptr);
-                ntpAttempts++;
-            }
-            if (now < 1700000000) {
-                Serial.println(F("\n[NTP] ✗ Sync FAILED (will retry later). Using epoch fallback."));
-            } else {
-            struct tm timeinfo;
-            getLocalTime(&timeinfo);
-            Serial.printf("\n[NTP] ✓ Synced: %s\n", asctime(&timeinfo));
-        } else {
-            Serial.println(F("[BOOT] Hardcoded WiFi failed."));
-            Serial.println(F("[BOOT] Type '1' + Enter in Serial Monitor to configure WiFi."));
-        }
+        Serial.println(F("[BOOT] Starting WiFi configuration portal..."));
+        startConfigPortal();
     }
 
     // Print config
@@ -711,14 +995,16 @@ void setup() {
     Serial.printf("  Device: %s\n", DEVICE_ID);
     Serial.printf("  Interval: %lu ms\n", READ_INTERVAL_MS);
     Serial.printf("  Queue: %d entries, drain %d/cycle\n", MAX_QUEUE, DRAIN_PER_CYCLE);
-    Serial.printf("  Voltage Divider: 4.7k/9k (ratio %.4f)\n", VOLTAGE_DIVIDER_RATIO);
+    Serial.printf("  Voltage Divider: 68k/100k + 104 cap (correction %.4f)\n", VOLTAGE_DIVIDER_RATIO);
+    Serial.printf("  Effective MQ load: %.2f ohm (10k || 168k)\n", EFFECTIVE_RL_OHMS);
+    Serial.println(F("  WARNING: R0 must be recalibrated after changing divider resistors"));
     Serial.println(F(""));
     Serial.println(F("R0 VALUES (24-hour burn-in):"));
     Serial.printf("  MQ135: %.2f Ω\n", MQ135_R0);
     Serial.printf("  MQ136: %.2f Ω\n", MQ136_R0);
     Serial.printf("  MQ137: %.2f Ω\n", MQ137_R0);
     Serial.println(F(""));
-    Serial.println(F("COMMANDS: Type '1' + Enter → WiFi config portal"));
+    Serial.println(F("COMMANDS: '1'=WiFi portal | '2'=BME rescan | '3'=deep I2C diagnostics"));
     Serial.println(F(""));
     Serial.println(F("Starting sensor readings...\n"));
 }
@@ -734,13 +1020,18 @@ void loop() {
         input.trim();
         if (input == "1" && !portalActive) {
             startConfigPortal();
+        } else if (input == "2") {
+            initBME280();  // Re-probe BME280 + I2C scan (hot-plug friendly)
+        } else if (input == "3") {
+            deepI2CDiagnostics();
         }
     }
 
     // ── Handle SoftAP portal if active ──
     if (portalActive) {
         handlePortalLoop();
-        return;  // Don't do sensor readings while in config mode
+        // Continue reading sensors below for live diagnostics, but the
+        // cloud send section is skipped while in config mode.
     }
 
     // ── Check WiFi ──
@@ -769,9 +1060,9 @@ void loop() {
     }
 
     // ── 2. Read sensors ──
-    int adcMQ135 = analogRead(MQ135_PIN);
-    int adcMQ136 = analogRead(MQ136_PIN);
-    int adcMQ137 = analogRead(MQ137_PIN);
+    int adcMQ135 = readFilteredADC(MQ135_PIN);
+    int adcMQ136 = readFilteredADC(MQ136_PIN);
+    int adcMQ137 = readFilteredADC(MQ137_PIN);
 
     float vMQ135 = (adcMQ135 / (float)ADC_RESOLUTION) * ESP32_VREF * VOLTAGE_DIVIDER_RATIO;
     float vMQ136 = (adcMQ136 / (float)ADC_RESOLUTION) * ESP32_VREF * VOLTAGE_DIVIDER_RATIO;
@@ -809,6 +1100,12 @@ void loop() {
                   adcMQ136, vMQ136, rsMQ136, mq136_h2s, mq136_nh3, mq136_co);
     Serial.printf("MQ137  ADC:%-4d V:%.3f Rs:%.1f  NH3:%.2f ppm\n",
                   adcMQ137, vMQ137, rsMQ137, mq137_nh3);
+    if (bmeReady) {
+        Serial.printf("BME280 T:%.2fC H:%.1f%% P:%.2f hPa\n",
+                      bme.readTemperature(), bme.readHumidity(), bme.readPressure() / 100.0F);
+    } else {
+        Serial.println(F("BME280  ✗ Not detected (fallback: 25.0C 60.0% 1013.25 hPa)"));
+    }
     Serial.println(F("────────────────────────────────────────"));
     Serial.printf("Quality: %s  VOC:%.1f H2S:%.1f NH3:%.1f\n",
                   qualityLevel, mq135_voc, mq136_h2s, mq137_nh3);
@@ -819,7 +1116,9 @@ void loop() {
                     mq136_h2s, mq136_nh3, mq136_co,
                     mq137_nh3, qualityLevel);
 
-    if (WiFi.status() == WL_CONNECTED) {
+    if (portalActive) {
+        Serial.println(F("[PORTAL] Config mode — readings printed, not sent"));
+    } else if (WiFi.status() == WL_CONNECTED) {
         Serial.println(F("[LIVE] Sending current data..."));
         int code = httpPostJson(jsonBuf);
         if (code == 200 || code == 201) {

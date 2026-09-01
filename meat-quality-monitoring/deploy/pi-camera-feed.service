@@ -1,0 +1,20 @@
+[Unit]
+Description=Raspberry Pi Camera Module 3 live feed server
+After=local-fs.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zihan
+WorkingDirectory=/home/zihan/projects/meat-quality-monitoring
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/zihan/projects/meat-quality-monitoring/venv/bin/python3 /home/zihan/projects/meat-quality-monitoring/camera_feed.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+KillMode=mixed
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

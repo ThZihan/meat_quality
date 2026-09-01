@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Latest Capture & Data</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        html, body {
+            height: 100%;
+            background: #0e1117;
+            color: #fafafa;
+            font-family: "Segoe UI", "DejaVu Sans", Arial, sans-serif;
+        }
+
+        .container {
+            display: flex;
+            height: 100vh;
+            gap: 16px;
+            padding: 16px;
+        }
+
+        .panel {
+            flex: 1 1 50%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: #161b24;
+            border: 1px solid #263042;
+            border-radius: 14px;
+            padding: 18px;
+            min-width: 0;
+        }
+
+        /* ----- left: image ----- */
+        #latest-img {
+            max-width: 100%;
+            max-height: 74vh;
+            object-fit: contain;
+            border-radius: 10px;
+        }
+
+        #img-placeholder {
+            max-width: 100%;
+            max-height: 74vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #5c6b82;
+            font-size: 1.3rem;
+            text-align: center;
+            min-height: 300px;
+        }
+
+        .time-label {
+            margin-top: 14px;
+            font-size: 1.25rem;
+            color: #9aa7bb;
+            text-align: center;
+        }
+
+        /* ----- right: data ----- */
+        .data-list {
+            width: 100%;
+            max-width: 400px;
+        }
+
+        .data-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 6px;
+            border-bottom: 1px solid #263042;
+            font-size: 1.05rem;
+        }
+
+        .data-row .label { color: #9aa7bb; }
+        .data-row .value { font-weight: 600; }
+
+        #v-quality {
+            padding: 2px 10px;
+            border-radius: 6px;
+            font-weight: 700;
+            font-size: 0.95rem;
+            letter-spacing: 0.5px;
+        }
+
+        .q-good  { color: #00c853; background: rgba(0, 200, 83, 0.12); }
+        .q-warn  { color: #ffa500; background: rgba(255, 165, 0, 0.12); }
+        .q-bad   { color: #ff5252; background: rgba(255, 82, 82, 0.12); }
+        .q-unknown { color: #9aa7bb; background: rgba(154, 167, 187, 0.12); }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- LEFT: latest captured image + capture time -->
+        <div class="panel">
+            <img id="latest-img" alt="Latest capture" style="display:none;">
+            <div id="img-placeholder">Waiting for first capture&hellip;</div>
+            <div class="time-label" id="img-time">&mdash;</div>
+        </div>
+
+        <!-- RIGHT: latest sensor data + reading time -->
+        <div class="panel">
+            <div class="data-list">
+                <div class="data-row">
+                    <span class="label">Temperature</span>
+                    <span class="value" id="v-temp">&mdash;</span>
+                </div>
+                <div class="data-row">
+                    <span class="label">Humidity</span>
+                    <span class="value" id="v-hum">&mdash;</span>
+                </div>
+                <div class="data-row">
+                    <span class="label">VOC (MQ135)</span>
+                    <span class="value" id="v-voc">&mdash;</span>
+                </div>
+                <div class="data-row">
+                    <span class="label">H&#8322;S (MQ136)</span>
+                    <span class="value" id="v-h2s">&mdash;</span>
+                </div>
+                <div class="data-row">
+                    <span class="label">NH&#8323; (MQ137)</span>
+                    <span class="value" id="v-nh3">&mdash;</span>
+                </div>
+                <div class="data-row" style="border-bottom: none;">
+                    <span class="label">Quality</span>
+                    <span class="value" id="v-quality" class="q-unknown">UNKNOWN</span>
+                </div>
+            </div>
+            <div class="time-label" id="data-time">&mdash;</div>
+        </div>
+    </div>
+
+    <script>
+        const POLL_INTERVAL_MS = 5000;
+        let lastImageEpoch = null;
+
+        function setText(id, text) {
+            document.getElementById(id).textContent = text;
+        }
+
+        function qualityClass(level) {
+            const good = ["EXCELLENT", "GOOD", "FRESH"];
+            const warn = ["FAIR", "WARNING", "MODERATE"];
+            const bad  = ["POOR", "BAD", "SPOILED", "CRITICAL"];
+            const value = String(level || "").toUpperCase();
+            if (good.includes(value)) return "q-good";
+            if (warn.includes(value)) return "q-warn";
+            if (bad.includes(value))  return "q-bad";
+            return "q-unknown";
+        }
+
+        async function refresh() {
+            try {
+                const response = await fetch("/api/latest", {cache: "no-store"});
+                if (!response.ok) return;
+                const data = await response.json();
+
+                // ---- left panel: image ----
+                const img = document.getElementById("latest-img");
+                const placeholder = document.getElementById("img-placeholder");
+                if (data.image && data.image.available) {
+                    setText("img-time", "Captured: " + (data.image.capture_time || "\u2014"));
+                    if (data.image.epoch !== lastImageEpoch) {
+                        lastImageEpoch = data.image.epoch;
+                        img.src = "/latest_image?t=" + encodeURIComponent(data.image.epoch);
+                        img.style.display = "";
+                        placeholder.style.display = "none";
+                    }
+                } else {
+                    img.style.display = "none";
+                    placeholder.style.display = "";
+                    setText("img-time", "\u2014");
+                }
+
+                // ---- right panel: sensor data ----
+                const reading = data.reading;
+                if (reading && reading.available) {
+                    setText("v-temp", reading.temperature + " \u00B0C");
+                    setText("v-hum",  reading.humidity + " %");
+                    setText("v-voc",  reading.voc + " ppm");
+                    setText("v-h2s",  reading.h2s + " ppm");
+                    setText("v-nh3",  reading.nh3 + " ppm");
+                    const quality = document.getElementById("v-quality");
+                    quality.textContent = reading.quality;
+                    quality.className = qualityClass(reading.quality);
+                    setText("data-time", "Reading time: " + (reading.time || "\u2014"));
+                }
+            } catch (error) {
+                /* keep showing the last known values while offline */
+            }
+        }
+
+        refresh();
+        setInterval(refresh, POLL_INTERVAL_MS);
+    </script>
+</body>
+</html>

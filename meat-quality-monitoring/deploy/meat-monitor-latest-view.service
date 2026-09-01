@@ -1,0 +1,18 @@
+[Unit]
+Description=Meat Quality Monitor - Latest View web page (port 8600)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zihan
+WorkingDirectory=/home/zihan/projects/meat-quality-monitoring
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/zihan/projects/meat-quality-monitoring/venv/bin/python latest_view.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

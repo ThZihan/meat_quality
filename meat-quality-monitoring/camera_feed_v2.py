@@ -1,8 +1,19 @@
 #!/usr/bin/env python3
 """
-Live Camera Feed Server using Flask
-Provides MJPEG streaming from Raspberry Pi Camera Module 3 at localhost/camera_feed
-Uses rpicam-vid for streaming (libcamera stack) with autofocus support
+Live Camera Feed Server for Raspberry Pi Camera Module v2.1 (IMX219)
+
+Flask server providing MJPEG streaming at http://localhost:5000
+Uses rpicam-vid (libcamera stack). The v2.1 has a FIXED-FOCUS lens, so no
+autofocus options are passed to rpicam-vid / rpicam-still.
+
+Endpoints (same surface as camera_feed.py):
+    /                 - viewer page (templates/camera_feed_v2.html)
+    /video_feed       - MJPEG stream
+    /status           - camera status JSON
+    /config           - GET/POST runtime configuration
+    /capture          - latest low-res JPEG frame from the live stream
+    /capture_highres  - full-resolution rpicam-still capture (3280x2464)
+    /autofocus_trigger - stub, reports fixed-focus (kept for compatibility)
 """
 
 import logging
@@ -15,10 +26,10 @@ from pathlib import Path
 from typing import Optional, Tuple, Generator, Dict, Any
 from flask import Flask, Response, render_template, request
 
-# Import camera configuration
-from camera_config import (
-    CameraFeedConfig,
-    CameraCaptureConfig,
+# Import v2.1 camera configuration (no autofocus, IMX219 limits)
+from camera_config_v2 import (
+    CameraFeedConfigV2,
+    CameraCaptureConfigV2,
     DEFAULT_FEED_CONFIG,
     DEFAULT_CAPTURE_CONFIG,
     RESOLUTION_PRESETS,
@@ -32,6 +43,7 @@ from camera_config import (
     JPEG_START_MARKER,
     JPEG_END_MARKER,
     MULTIPART_BOUNDARY,
+    CAMERA_MODEL_NAME,
     LED_GPIO_PIN,
     LED_PWM_FREQUENCY,
     LED_DARK_THRESHOLD,
@@ -72,12 +84,6 @@ shutdown_event = threading.Event()
 latest_frame: Optional[bytes] = None
 frame_lock = threading.Lock()
 
-# Coordinate high-resolution stills with MJPEG readers. A still capture must
-# temporarily own the camera; otherwise a connected /video_feed client can see
-# rpicam-vid terminate and immediately restart it while rpicam-still is active.
-capture_in_progress = threading.Event()
-still_capture_lock = threading.Lock()
-
 # Global LED / light-monitor state
 led_lock = threading.Lock()
 led_controller = get_led_controller(LED_GPIO_PIN, LED_PWM_FREQUENCY)
@@ -111,7 +117,7 @@ class CameraProcessError(CameraError):
 def check_rpicam_available() -> bool:
     """
     Check if rpicam-vid is available on the system
-    
+
     Returns:
         True if rpicam-vid is available, False otherwise
     """
@@ -149,11 +155,6 @@ def set_led_duty_cycle(duty_cycle: float, *, record_update: bool = True) -> floa
         led_controller.set_brightness(duty_cycle)
         if record_update and abs(led_controller.duty_cycle - previous_duty) > 0.001:
             last_led_update_time = time.monotonic()
-        logger.info(
-            "LED debug: controller duty after apply=%.2f last_update_time_set=%s",
-            led_controller.duty_cycle,
-            record_update and abs(led_controller.duty_cycle - previous_duty) > 0.001,
-        )
         return led_controller.duty_cycle
 
 
@@ -168,21 +169,6 @@ def update_led_from_jpeg(jpeg_bytes: bytes) -> Dict[str, Any]:
         last_update_time=last_led_update_time,
     )
 
-    last_update_age = (
-        None
-        if last_led_update_time is None
-        else time.monotonic() - last_led_update_time
-    )
-    logger.info(
-        "LED debug: brightness=%.1f current=%.2f target=%.2f changed=%s available=%s last_update_age=%s",
-        brightness,
-        current_duty,
-        target_duty,
-        changed,
-        led_controller.available,
-        "none" if last_update_age is None else f"{last_update_age:.2f}s",
-    )
-
     if changed:
         set_led_duty_cycle(target_duty)
 
@@ -195,22 +181,15 @@ def update_led_from_jpeg(jpeg_bytes: bytes) -> Dict[str, Any]:
 
 
 def build_still_capture_command(
-    config: CameraCaptureConfig,
+    config: CameraCaptureConfigV2,
     output_target: str,
     *,
     width: Optional[int] = None,
     height: Optional[int] = None,
     quality: int = 95,
     timeout_ms: Optional[int] = None,
-    autofocus_on_capture: bool = False,
 ) -> list[str]:
-    """Build an ``rpicam-still`` command for a Module 3 JPEG capture.
-
-    The preliminary light probe uses continuous autofocus during its short
-    preview. The final full-resolution image requests a dedicated autofocus
-    scan immediately before capture. We deliberately avoid ``--immediate`` so
-    autofocus, automatic exposure, and white balance have time to settle.
-    """
+    """Build an `rpicam-still` command for JPEG capture (no AF flags: fixed focus)."""
     cmd = [
         RPICAM_STILL_CMD,
         "-t", str(timeout_ms or config.timeout),
@@ -224,17 +203,6 @@ def build_still_capture_command(
 
     if config.iso > 0:
         cmd.extend(["--gain", str(max(1, config.iso // 100))])
-
-    autofocus_mode = "auto" if autofocus_on_capture else config.autofocus_mode.value
-    cmd.extend(["--autofocus-mode", autofocus_mode])
-    cmd.extend(["--autofocus-range", config.autofocus_range.value])
-    cmd.extend(["--autofocus-speed", config.autofocus_speed.value])
-
-    if autofocus_on_capture:
-        cmd.append("--autofocus-on-capture")
-
-    if config.autofocus_trigger:
-        cmd.extend(["--autofocus-trigger", config.autofocus_trigger])
 
     return cmd
 
@@ -267,66 +235,53 @@ def pause_live_feed_for_capture() -> None:
 def restart_live_feed_after_capture() -> None:
     """Restart the live feed after a still capture attempt."""
     try:
-        get_camera_process(allow_during_capture=True)
+        get_camera_process()
         logger.info("Live feed restarted successfully")
     except Exception as e:
         logger.error(f"Failed to restart live feed: {e}")
 
 
-def get_camera_process(
-    config: CameraFeedConfig = DEFAULT_FEED_CONFIG,
-    *,
-    allow_during_capture: bool = False,
-) -> Optional[subprocess.Popen]:
+def get_camera_process(config: CameraFeedConfigV2 = DEFAULT_FEED_CONFIG) -> Optional[subprocess.Popen]:
     """
     Get or initialize the rpicam-vid process for continuous capture
-    
+
     Args:
         config: Camera configuration object
-        
+
     Returns:
         The camera subprocess or None if initialization failed
-        
+
     Raises:
         CameraInitializationError: If camera cannot be initialized
     """
     global camera_process
 
-    # Any route can call this function (stream startup, /status, /config). If a
-    # high-resolution still currently owns the IMX708, wait for its controlled
-    # restart instead of launching a competing rpicam-vid process. Only the
-    # high-resolution endpoint's own restart bypasses this gate.
-    while capture_in_progress.is_set() and not allow_during_capture:
-        if shutdown_event.is_set():
-            return None
-        time.sleep(0.05)
-
     with camera_lock:
         if camera_process is None or camera_process.poll() is not None:
             try:
                 cmd = config.get_rpicam_args()
-                
-                logger.info(f"Starting camera with config: {config.frame_width}x{config.frame_height} @ {config.frame_rate}fps")
+
+                logger.info(f"Starting v2.1 camera with config: {config.frame_width}x{config.frame_height} @ {config.frame_rate}fps")
                 logger.debug(f"Command: {' '.join(cmd)}")
-                
+
                 camera_process = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     bufsize=10**8
                 )
-                
+
                 # Give camera time to initialize
                 time.sleep(0.5)
-                
+
                 # Check if process is still running
                 if camera_process.poll() is not None:
                     stderr = camera_process.stderr.read().decode('utf-8', errors='ignore')
                     raise CameraInitializationError(f"Camera process exited immediately: {stderr}")
-                
+
                 logger.info(f"Camera started successfully: PID {camera_process.pid}")
-                logger.info(f"Autofocus: mode={config.autofocus_mode.value}, range={config.autofocus_range.value}, speed={config.autofocus_speed.value}")
-                
+                logger.info("Focus: fixed (IMX219 lens, no autofocus hardware)")
+
             except FileNotFoundError as e:
                 logger.error(f"{RPICAM_VID_CMD} not found: {e}")
                 raise CameraInitializationError(
@@ -335,45 +290,40 @@ def get_camera_process(
             except Exception as e:
                 logger.error(f"Failed to start camera: {e}")
                 raise CameraInitializationError(f"Failed to start camera: {e}")
-        
+
         return camera_process
 
 
 def find_jpeg_markers(data: bytes, start_pos: int = 0) -> Optional[Tuple[int, int]]:
     """
     Find JPEG start (0xFFD8) and end (0xFFD9) markers in data
-    
+
     Args:
         data: Byte data to search for JPEG markers
         start_pos: Position to start searching from
-        
+
     Returns:
         Tuple of (start, end) positions or None if markers not found
     """
-    # Find JPEG start marker
     start = data.find(JPEG_START_MARKER, start_pos)
     if start == -1:
         return None
-    
-    # Find JPEG end marker after start
+
     end = data.find(JPEG_END_MARKER, start + 2)
     if end == -1:
         return None
-    
+
     return (start, end + 2)  # Include the end marker
 
 
-def generate_frames(config: CameraFeedConfig = DEFAULT_FEED_CONFIG) -> Generator[bytes, None, None]:
+def generate_frames(config: CameraFeedConfigV2 = DEFAULT_FEED_CONFIG) -> Generator[bytes, None, None]:
     """
     Generator function that yields MJPEG frames from rpicam-vid
     Properly formats as multipart HTTP response
-    
-    Args:
-        config: Camera configuration object
-        
+
     Yields:
         Multipart formatted MJPEG frames
-        
+
     Raises:
         CameraProcessError: If camera process encounters an error
     """
@@ -382,36 +332,24 @@ def generate_frames(config: CameraFeedConfig = DEFAULT_FEED_CONFIG) -> Generator
         if proc is None:
             logger.error("Camera process is None")
             return
-        
+
         buffer = b''
         consecutive_errors = 0
         max_consecutive_errors = MAX_CONSECUTIVE_ERRORS
-        
+
         while not shutdown_event.is_set():
             try:
-                # Read data from rpicam-vid
                 data = proc.stdout.read(BUFFER_READ_SIZE)
                 if not data:
                     if proc.poll() is not None:
-                        if capture_in_progress.is_set():
-                            # The high-resolution endpoint intentionally stopped
-                            # this process. Wait until it completes rather than
-                            # racing rpicam-still for the camera device.
-                            time.sleep(0.05)
-                            continue
-
                         logger.warning("Camera process terminated, restarting...")
                         consecutive_errors += 1
-                        
+
                         if consecutive_errors >= max_consecutive_errors:
                             raise CameraProcessError("Camera process terminated too many times")
-                        
+
                         global camera_process
-                        with camera_lock:
-                            # Do not discard a replacement process that the
-                            # high-resolution endpoint may already have started.
-                            if camera_process is proc:
-                                camera_process = None
+                        camera_process = None
                         proc = get_camera_process(config)
                         if proc is None:
                             logger.error("Failed to restart camera process")
@@ -422,24 +360,22 @@ def generate_frames(config: CameraFeedConfig = DEFAULT_FEED_CONFIG) -> Generator
                         # Process still running but no data, wait a bit
                         time.sleep(0.01)
                         continue
-                
+
                 consecutive_errors = 0  # Reset error counter on successful read
                 buffer += data
-                
+
                 # Extract complete JPEG frames from buffer
                 while True:
                     result = find_jpeg_markers(buffer)
                     if result is None:
-                        # No complete frame found, keep accumulating
-                        # Limit buffer size to prevent memory issues
                         if len(buffer) > MAX_BUFFER_SIZE:
                             logger.warning("Buffer too large, clearing")
                             buffer = b''
                         break
-                    
+
                     start, end = result
                     jpeg_frame = buffer[start:end]
-                    
+
                     # Update shared frame buffer for capture requests (thread-safe)
                     with frame_lock:
                         global latest_frame
@@ -456,14 +392,14 @@ def generate_frames(config: CameraFeedConfig = DEFAULT_FEED_CONFIG) -> Generator
                                 led_state['brightness'],
                                 led_state['target_duty'],
                             )
-                    
+
                     # Remove the processed frame from buffer
                     buffer = buffer[end:]
-                    
+
                     # Yield frame as part of multipart response
                     yield (b'--frame\r\n'
                            b'Content-Type: image/jpeg\r\n\r\n' + jpeg_frame + b'\r\n')
-                    
+
             except GeneratorExit:
                 logger.info("Stream closed by client")
                 break
@@ -473,7 +409,7 @@ def generate_frames(config: CameraFeedConfig = DEFAULT_FEED_CONFIG) -> Generator
                 if consecutive_errors >= max_consecutive_errors:
                     raise CameraProcessError(f"Too many consecutive errors: {e}")
                 time.sleep(0.1)
-                
+
     except CameraProcessError as e:
         logger.error(f"Camera process error: {e}")
         raise
@@ -485,14 +421,14 @@ def generate_frames(config: CameraFeedConfig = DEFAULT_FEED_CONFIG) -> Generator
 @app.route('/')
 def index() -> str:
     """
-    Render the camera feed page
-    
+    Render the v2.1 camera feed page
+
     Returns:
         Rendered HTML template
     """
-    return render_template('camera_feed.html',
-                          frame_width=DEFAULT_FEED_CONFIG.frame_width,
-                          frame_height=DEFAULT_FEED_CONFIG.frame_height)
+    return render_template('camera_feed_v2.html',
+                           frame_width=DEFAULT_FEED_CONFIG.frame_width,
+                           frame_height=DEFAULT_FEED_CONFIG.frame_height)
 
 
 @app.route('/video_feed')
@@ -500,7 +436,7 @@ def video_feed() -> Response:
     """
     Video streaming route
     Returns a multipart response with MJPEG frames
-    
+
     Returns:
         Flask Response object with MJPEG stream
     """
@@ -512,7 +448,7 @@ def video_feed() -> Response:
 def status() -> Dict[str, Any]:
     """
     Camera status endpoint
-    
+
     Returns:
         Dictionary containing camera status information
     """
@@ -523,7 +459,7 @@ def status() -> Dict[str, Any]:
                 'status': 'error',
                 'message': 'Camera not available'
             }
-        
+
         return {
             'status': 'ok',
             'frame_width': DEFAULT_FEED_CONFIG.frame_width,
@@ -531,10 +467,8 @@ def status() -> Dict[str, Any]:
             'fps': DEFAULT_FEED_CONFIG.frame_rate,
             'pid': proc.pid,
             'camera_type': f'{RPICAM_VID_CMD} (libcamera)',
-            'camera_model': 'Raspberry Pi Camera Module 3',
-            'autofocus_mode': DEFAULT_FEED_CONFIG.autofocus_mode.value,
-            'autofocus_range': DEFAULT_FEED_CONFIG.autofocus_range.value,
-            'autofocus_speed': DEFAULT_FEED_CONFIG.autofocus_speed.value
+            'camera_model': CAMERA_MODEL_NAME,
+            'focus_type': 'fixed'
         }
     except CameraInitializationError as e:
         return {
@@ -549,12 +483,11 @@ def config() -> Dict[str, Any]:
     Camera configuration endpoint
     GET: Returns current configuration
     POST: Updates configuration (requires restart)
-    
+
     Returns:
         Dictionary containing configuration information
     """
     if request.method == 'POST':
-        # Update configuration from request
         data = request.get_json()
         if data:
             if 'frame_rate' in data:
@@ -565,16 +498,7 @@ def config() -> Dict[str, Any]:
                 DEFAULT_FEED_CONFIG.frame_height = int(data['frame_height'])
             if 'jpeg_quality' in data:
                 DEFAULT_FEED_CONFIG.jpeg_quality = int(data['jpeg_quality'])
-            if 'autofocus_mode' in data:
-                from camera_config import AutofocusMode
-                DEFAULT_FEED_CONFIG.autofocus_mode = AutofocusMode(data['autofocus_mode'])
-            if 'autofocus_range' in data:
-                from camera_config import AutofocusRange
-                DEFAULT_FEED_CONFIG.autofocus_range = AutofocusRange(data['autofocus_range'])
-            if 'autofocus_speed' in data:
-                from camera_config import AutofocusSpeed
-                DEFAULT_FEED_CONFIG.autofocus_speed = AutofocusSpeed(data['autofocus_speed'])
-            
+
             # Restart camera with new configuration
             cleanup_camera()
             try:
@@ -584,17 +508,16 @@ def config() -> Dict[str, Any]:
                     'status': 'error',
                     'message': str(e)
                 }
-    
+
     return {
         'status': 'ok',
+        'camera_model': CAMERA_MODEL_NAME,
         'config': {
             'frame_rate': DEFAULT_FEED_CONFIG.frame_rate,
             'frame_width': DEFAULT_FEED_CONFIG.frame_width,
             'frame_height': DEFAULT_FEED_CONFIG.frame_height,
             'jpeg_quality': DEFAULT_FEED_CONFIG.jpeg_quality,
-            'autofocus_mode': DEFAULT_FEED_CONFIG.autofocus_mode.value,
-            'autofocus_range': DEFAULT_FEED_CONFIG.autofocus_range.value,
-            'autofocus_speed': DEFAULT_FEED_CONFIG.autofocus_speed.value
+            'focus_type': 'fixed'
         }
     }
 
@@ -602,38 +525,15 @@ def config() -> Dict[str, Any]:
 @app.route('/autofocus_trigger', methods=['POST'])
 def autofocus_trigger() -> Dict[str, Any]:
     """
-    Trigger autofocus on Camera Module 3
-    
+    Compatibility stub - Pi Camera v2.1 has a fixed-focus lens.
+
     Returns:
-        Dictionary containing trigger status
+        Dictionary explaining autofocus is not available on this module
     """
-    try:
-        data = request.get_json() or {}
-        trigger_type = data.get('trigger', 'start')
-        
-        if trigger_type not in ['start', 'cancel']:
-            return {
-                'status': 'error',
-                'message': 'Invalid trigger type. Use "start" or "cancel"'
-            }
-        
-        # Trigger autofocus by restarting camera with trigger
-        old_config = DEFAULT_FEED_CONFIG.autofocus_trigger
-        DEFAULT_FEED_CONFIG.autofocus_trigger = trigger_type
-        cleanup_camera()
-        get_camera_process()
-        DEFAULT_FEED_CONFIG.autofocus_trigger = None  # Reset after trigger
-        
-        return {
-            'status': 'ok',
-            'message': f'Autofocus {trigger_type} triggered'
-        }
-    except Exception as e:
-        logger.error(f"Error triggering autofocus: {e}")
-        return {
-            'status': 'error',
-            'message': str(e)
-        }
+    return {
+        'status': 'error',
+        'message': 'Autofocus is not supported on Raspberry Pi Camera Module v2.1 (IMX219 fixed-focus lens)'
+    }
 
 
 @app.route('/capture')
@@ -641,7 +541,7 @@ def capture_frame() -> Response:
     """
     Capture endpoint - Returns the latest JPEG frame from the camera stream
     (Low resolution: 800x480 for fast capture from live feed)
-    
+
     Returns:
         Flask Response with JPEG image data or error message
     """
@@ -654,7 +554,7 @@ def capture_frame() -> Response:
                      'message': 'Camera not ready - no frame available yet. Please ensure camera feed is running.'},
                     status=400
                 )
-            
+
             # Return the latest frame as JPEG
             return Response(
                 latest_frame,
@@ -676,25 +576,17 @@ def capture_frame() -> Response:
 def capture_highres_frame() -> Response:
     """
     High-resolution capture endpoint - Captures a new image at maximum resolution
-    Uses rpicam-still for high-quality capture (4608x2592)
-    
+    Uses rpicam-still for high-quality capture (3280x2464 for v2.1)
+
     Note: Temporarily pauses the live feed to capture at high resolution,
     then restarts the feed. This is necessary because the camera can only
     be accessed by one process at a time.
-    
+
     Returns:
         Flask Response with JPEG image data or error message
     """
     config = DEFAULT_CAPTURE_CONFIG
     dummy_capture_path: Optional[Path] = None
-
-    if not still_capture_lock.acquire(blocking=False):
-        return Response(
-            {'status': 'error', 'message': 'A high-resolution capture is already in progress'},
-            status=409,
-        )
-
-    capture_in_progress.set()
 
     logger.info(f"High-res capture: {config.width}x{config.height}, ISO={config.iso}")
     logger.info("Pausing live feed for LED-assisted high-resolution capture...")
@@ -751,11 +643,7 @@ def capture_highres_frame() -> Response:
         if led_state['target_duty'] > 0.0 and LED_SETTLE_TIME > 0:
             time.sleep(LED_SETTLE_TIME)
 
-        final_cmd = build_still_capture_command(
-            config,
-            "-",
-            autofocus_on_capture=True,
-        )
+        final_cmd = build_still_capture_command(config, "-")
         logger.debug(f"High-res capture command: {' '.join(final_cmd)}")
 
         final_result = subprocess.run(
@@ -822,8 +710,6 @@ def capture_highres_frame() -> Response:
 
         logger.info("Restarting live feed...")
         restart_live_feed_after_capture()
-        capture_in_progress.clear()
-        still_capture_lock.release()
 
 
 def cleanup_camera() -> None:
@@ -836,12 +722,10 @@ def cleanup_camera() -> None:
         if camera_process is not None:
             try:
                 if camera_process.poll() is None:
-                    # Try graceful termination first
                     camera_process.terminate()
                     try:
                         camera_process.wait(timeout=PROCESS_TERMINATION_TIMEOUT)
                     except subprocess.TimeoutExpired:
-                        # Force kill if graceful termination fails
                         logger.warning("Camera process did not terminate gracefully, killing")
                         camera_process.kill()
                         camera_process.wait()
@@ -860,7 +744,7 @@ def cleanup_camera() -> None:
 def signal_handler(signum: int, frame) -> None:
     """
     Handle shutdown signals gracefully
-    
+
     Args:
         signum: Signal number
         frame: Current stack frame
@@ -879,21 +763,21 @@ signal.signal(signal.SIGTERM, signal_handler)
 
 if __name__ == '__main__':
     logger.info("=" * 60)
-    logger.info("Live Camera Feed Server - Camera Module 3")
+    logger.info("Live Camera Feed Server - Pi Camera Module v2.1 (IMX219)")
     logger.info("=" * 60)
-    
+
     # Check rpicam-vid availability
     if not check_rpicam_available():
         logger.error(f"{RPICAM_VID_CMD} not found!")
         logger.error("Please install libcamera-apps:")
         logger.error("  sudo apt install libcamera-apps")
         exit(1)
-    
-    logger.info(f"Using {RPICAM_VID_CMD} for Camera Module 3 streaming")
+
+    logger.info(f"Using {RPICAM_VID_CMD} for Camera v2.1 streaming")
     logger.info(f"Resolution: {DEFAULT_FEED_CONFIG.frame_width}x{DEFAULT_FEED_CONFIG.frame_height}")
     logger.info(f"Frame Rate: {DEFAULT_FEED_CONFIG.frame_rate} fps")
-    logger.info(f"Autofocus: mode={DEFAULT_FEED_CONFIG.autofocus_mode.value}, range={DEFAULT_FEED_CONFIG.autofocus_range.value}")
-    
+    logger.info("Focus: fixed (no autofocus on IMX219)")
+
     # Initialize camera
     try:
         proc = get_camera_process()
@@ -902,15 +786,16 @@ if __name__ == '__main__':
             logger.error("Please check:")
             logger.error("  1. Camera is properly connected")
             logger.error("  2. Camera is enabled (sudo raspi-config)")
-            logger.error(f"  3. {RPICAM_VID_CMD} is installed")
+            logger.error("  3. /boot/firmware/config.txt has dtoverlay=imx219")
+            logger.error(f"  4. {RPICAM_VID_CMD} is installed")
             exit(1)
     except CameraInitializationError as e:
         logger.error(f"Camera initialization failed: {e}")
         exit(1)
-    
+
     logger.info(f"Camera feed will be available at: http://localhost:5000")
     logger.info("=" * 60)
-    
+
     try:
         # Run Flask app
         app.run(host='0.0.0.0', port=5000, debug=False, threaded=True, use_reloader=False)

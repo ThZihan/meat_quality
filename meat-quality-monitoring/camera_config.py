@@ -215,7 +215,7 @@ class CameraCaptureConfig:
     height: int = 2592
     format: str = 'png'
     timeout: int = 5000  # milliseconds
-    iso: int = 100  # Low ISO for best quality
+    iso: int = 0  # 0 = auto gain (AEC controls gain+shutter); >0 locks analog gain
     autofocus_mode: AutofocusMode = AutofocusMode.CONTINUOUS
     autofocus_range: AutofocusRange = AutofocusRange.NORMAL
     autofocus_speed: AutofocusSpeed = AutofocusSpeed.NORMAL
@@ -247,7 +247,7 @@ class CameraCaptureConfig:
             height = int(os.getenv('CAMERA_CAPTURE_HEIGHT', 2592))
             format = os.getenv('CAMERA_CAPTURE_FORMAT', 'png')
             timeout = int(os.getenv('CAMERA_CAPTURE_TIMEOUT', 5000))
-            iso = int(os.getenv('CAMERA_CAPTURE_ISO', 100))
+            iso = int(os.getenv('CAMERA_CAPTURE_ISO', 0))
             
             # Parse autofocus mode
             autofocus_mode_str = os.getenv('CAMERA_AUTOFOCUS_MODE', 'continuous')
@@ -296,9 +296,11 @@ class CameraCaptureConfig:
             "--nopreview",  # Disable preview
         ]
         
-        # Add ISO setting for low light sensitivity control
+        # Optional manual gain (ISO > 0). Default 0 keeps AEC free to raise
+        # gain in dim light; locking gain at 1 produced black frames. The
+        # --immediate flag is gone: AEC/AWB need the settle time to converge.
         if self.iso > 0:
-            args.extend(["--immediate", "--gain", str(self.iso // 100)])  # Map ISO to gain
+            args.extend(["--gain", str(max(1, self.iso // 100))])  # Map ISO to gain
         
         # Add autofocus options for Camera Module 3
         args.extend(["--autofocus-mode", self.autofocus_mode.value])

@@ -1,9 +1,12 @@
-#!/usr/bin/env python3
+  #!/usr/bin/env python3
 """
 Continuous image capture service for Raspberry Pi.
 
 Default behavior:
-- Captures one image every 30 seconds with libcamera-still.
+- Requests one high-resolution image every 30 seconds from the local Camera
+  Module 3 feed server at http://127.0.0.1:5000/capture_highres.
+- The feed server safely pauses streaming, performs the LED-assisted IMX708
+  capture with autofocus, and resumes the live feed.
 - Saves files to /home/pi/pending_sync/.
 - Inserts a ledger record into SQLite with status='pending'.
 - Keeps running even if capture or database operations fail.
@@ -24,6 +27,9 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 from camera_config import (
     LED_BRIGHT_THRESHOLD,
@@ -52,11 +58,18 @@ DEFAULT_PENDING_DIR = Path(os.getenv("PENDING_SYNC_DIR", "/home/pi/pending_sync"
 DEFAULT_DB_PATH = Path(os.getenv("SYNC_DB_PATH", "/home/pi/sync_state.db"))
 DEFAULT_INTERVAL_SECONDS = 30
 DEFAULT_SIMULATED_IMAGE_SIZE = 1_500_000
+DEFAULT_CAPTURE_URL = os.getenv(
+    "CAMERA_CAPTURE_URL",
+    "http://127.0.0.1:5000/capture_highres",
+).strip()
+DEFAULT_CAPTURE_HTTP_TIMEOUT_SECONDS = float(
+    os.getenv("CAMERA_CAPTURE_HTTP_TIMEOUT", "30")
+)
 
 
 logger = logging.getLogger("capture")
 
-led_controller = get_led_controller(LED_GPIO_PIN, LED_PWM_FREQUENCY)
+led_controller = None
 light_detector_config = LightDetectorConfig(
     dark_threshold=LED_DARK_THRESHOLD,
     bright_threshold=LED_BRIGHT_THRESHOLD,
@@ -66,6 +79,19 @@ light_detector_config = LightDetectorConfig(
     pwm_step=LED_PWM_STEP,
 )
 last_led_update_time: float | None = None
+
+
+def get_capture_led_controller():
+    """Lazily initialize the LED only for direct-camera capture mode.
+
+    Coordinated captures are sent to the feed server, which already owns GPIO
+    18 and performs the complete LED-assisted sequence. Avoiding eager GPIO
+    initialization prevents the timed client from competing with that server.
+    """
+    global led_controller
+    if led_controller is None:
+        led_controller = get_led_controller(LED_GPIO_PIN, LED_PWM_FREQUENCY)
+    return led_controller
 
 
 def get_default_camera_command_template() -> str:
@@ -189,14 +215,110 @@ def capture_with_libcamera(
         logger.info("libcamera stderr: %s", completed.stderr.strip())
 
 
+def capture_from_feed_server(
+    output_path: Path,
+    capture_url: str,
+    timeout_seconds: float,
+) -> None:
+    """Request a coordinated high-resolution capture from the live server.
+
+    The Camera Module 3 feed server owns the IMX708 device. Its high-resolution
+    endpoint pauses ``rpicam-vid``, performs the autofocus/LED-assisted still,
+    and restarts the feed. Using the endpoint avoids two independent processes
+    racing for the same camera.
+    """
+    logger.info("Requesting coordinated camera capture from %s", capture_url)
+    http_request = urllib_request.Request(
+        capture_url,
+        headers={
+            "Accept": "image/jpeg",
+            "User-Agent": "meat-monitor-timed-capture/1.0",
+        },
+    )
+
+    # Both systemd units start in parallel. If the timed client boots before
+    # Flask has bound port 5000, wait briefly instead of failing the iteration.
+    feed_startup_attempts = 30
+    for attempt in range(1, feed_startup_attempts + 1):
+        try:
+            with urllib_request.urlopen(http_request, timeout=timeout_seconds) as response:
+                status_code = getattr(response, "status", response.getcode())
+                content_type = response.headers.get_content_type()
+                image_bytes = response.read()
+            break
+        except urllib_error.HTTPError as error:
+            if error.code == 409 and attempt < feed_startup_attempts:
+                # Another high-resolution capture is still running on the
+                # feed server (for example after a service restart overlapped
+                # a cycle). Wait for it to finish instead of failing.
+                error.read(4096)
+                logger.warning(
+                    "Camera busy with another high-resolution capture (HTTP 409); retrying in 5s"
+                )
+                time.sleep(5)
+                continue
+            detail = error.read(4096).decode("utf-8", errors="replace").strip()
+            raise RuntimeError(
+                f"Camera feed server returned HTTP {error.code}: {detail or error.reason}"
+            ) from error
+        except urllib_error.URLError as error:
+            if isinstance(error.reason, ConnectionRefusedError) and attempt < feed_startup_attempts:
+                logger.warning(
+                    "Camera feed server not ready (attempt %d/%d); retrying in 2s",
+                    attempt,
+                    feed_startup_attempts,
+                )
+                time.sleep(2)
+                continue
+            raise RuntimeError(f"Could not reach camera feed server: {error.reason}") from error
+        except TimeoutError as error:
+            raise RuntimeError(
+                f"Camera feed server timed out after {timeout_seconds:.1f} seconds"
+            ) from error
+    else:
+        raise RuntimeError(
+            "Camera feed server did not become ready in time"
+        )
+
+    if status_code != 200:
+        raise RuntimeError(f"Camera feed server returned HTTP {status_code}")
+    if content_type != "image/jpeg":
+        raise RuntimeError(
+            f"Camera feed server returned unexpected content type {content_type!r}"
+        )
+    if (
+        len(image_bytes) < 1000
+        or not image_bytes.startswith(b"\xff\xd8")
+        or not image_bytes.rstrip().endswith(b"\xff\xd9")
+    ):
+        raise RuntimeError(
+            f"Camera feed server returned invalid JPEG data ({len(image_bytes)} bytes)"
+        )
+
+    temporary_path = output_path.with_name(f".{output_path.name}.part")
+    try:
+        temporary_path.write_bytes(image_bytes)
+        temporary_path.replace(output_path)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
+
+    logger.info(
+        "Coordinated Camera Module 3 capture saved: %s (%d bytes)",
+        output_path,
+        len(image_bytes),
+    )
+
+
 def set_led_duty_cycle(duty_cycle: float, *, record_update: bool = True) -> float:
     """Set the shared LED duty cycle for service captures."""
     global last_led_update_time
-    previous_duty = led_controller.duty_cycle
-    led_controller.set_brightness(duty_cycle)
-    if record_update and abs(led_controller.duty_cycle - previous_duty) > 0.001:
+    controller = get_capture_led_controller()
+    previous_duty = controller.duty_cycle
+    controller.set_brightness(duty_cycle)
+    if record_update and abs(controller.duty_cycle - previous_duty) > 0.001:
         last_led_update_time = time.monotonic()
-    return led_controller.duty_cycle
+    return controller.duty_cycle
 
 
 def capture_with_led_assistance(output_path: Path, command_template: str) -> None:
@@ -233,7 +355,7 @@ def capture_with_led_assistance(output_path: Path, command_template: str) -> Non
         target_duty, _ = brightness_to_pwm(
             brightness=brightness,
             config=light_detector_config,
-            current_duty=led_controller.duty_cycle,
+            current_duty=get_capture_led_controller().duty_cycle,
             last_update_time=last_led_update_time,
         )
 
@@ -293,6 +415,8 @@ def capture_once(
     command_template: str,
     simulate: bool,
     simulated_image_size: int,
+    capture_url: str | None = None,
+    capture_http_timeout: float = DEFAULT_CAPTURE_HTTP_TIMEOUT_SECONDS,
 ) -> Path:
     ensure_runtime_ready(db_path, pending_dir)
     output_path = generate_output_path(pending_dir)
@@ -301,6 +425,12 @@ def capture_once(
     try:
         if simulate:
             create_simulated_image(output_path, simulated_image_size)
+        elif capture_url:
+            capture_from_feed_server(
+                output_path=output_path,
+                capture_url=capture_url,
+                timeout_seconds=capture_http_timeout,
+            )
         else:
             capture_with_led_assistance(output_path, command_template)
 
@@ -345,6 +475,26 @@ def parse_args() -> argparse.Namespace:
         help="Command template used for subprocess capture; must include {output}",
     )
     parser.add_argument(
+        "--capture-url",
+        default=DEFAULT_CAPTURE_URL,
+        help=(
+            "Camera feed-server capture endpoint. Defaults to the local Module 3 "
+            "high-resolution endpoint. Pass an empty value with --direct-camera "
+            "to use rpicam-still directly."
+        ),
+    )
+    parser.add_argument(
+        "--capture-http-timeout",
+        type=float,
+        default=DEFAULT_CAPTURE_HTTP_TIMEOUT_SECONDS,
+        help="HTTP timeout in seconds for coordinated feed-server captures",
+    )
+    parser.add_argument(
+        "--direct-camera",
+        action="store_true",
+        help="Bypass the feed server and invoke rpicam-still directly",
+    )
+    parser.add_argument(
         "--simulate",
         action="store_true",
         help="Write a simulated image instead of calling libcamera-still",
@@ -361,10 +511,21 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     configure_logging()
     args = parse_args()
+    capture_url = None if args.direct_camera else args.capture_url.strip() or None
 
     try:
-        if "{output}" not in args.camera_command_template and not args.simulate:
+        if capture_url is None and "{output}" not in args.camera_command_template and not args.simulate:
             raise ValueError("--camera-command-template must contain the {output} placeholder")
+
+        if not args.simulate:
+            if capture_url:
+                logger.info(
+                    "Using coordinated Camera Module 3 endpoint %s (interval %.1fs)",
+                    capture_url,
+                    args.interval,
+                )
+            else:
+                logger.info("Using direct camera command mode (interval %.1fs)", args.interval)
 
         if args.once:
             try:
@@ -374,6 +535,8 @@ def main() -> int:
                     command_template=args.camera_command_template,
                     simulate=args.simulate,
                     simulated_image_size=args.simulate_size_bytes,
+                    capture_url=capture_url,
+                    capture_http_timeout=args.capture_http_timeout,
                 )
                 return 0
             except Exception as error:
@@ -388,6 +551,8 @@ def main() -> int:
                     command_template=args.camera_command_template,
                     simulate=args.simulate,
                     simulated_image_size=args.simulate_size_bytes,
+                    capture_url=capture_url,
+                    capture_http_timeout=args.capture_http_timeout,
                 )
             except Exception as error:
                 logger.exception("Capture loop iteration failed: %s", error)
@@ -397,11 +562,12 @@ def main() -> int:
         logger.info("Capture service interrupted, shutting down")
         return 0
     finally:
-        try:
-            led_controller.turn_off()
-        except Exception:
-            pass
-        cleanup_led()
+        if led_controller is not None:
+            try:
+                led_controller.turn_off()
+            except Exception:
+                pass
+            cleanup_led()
 
 
 if __name__ == "__main__":
