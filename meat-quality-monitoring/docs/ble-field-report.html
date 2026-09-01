@@ -1,0 +1,1618 @@
+<title>BLE Store-and-Forward Field Report</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+<style>
+:root{
+  --ground:#F5F7F8; --surface:#FFFFFF; --surface-2:#EFF3F5; --sunken:#E7EDF0;
+  --ink:#131A20; --ink-2:#4C5B66; --ink-3:#74838E;
+  --rule:#D9E1E6; --rule-strong:#BCC9D1;
+  --accent:#0B5F87; --accent-soft:#E2EFF5;
+  --amber:#A85A18; --amber-soft:#F6EADD;
+  --ok:#1E6B4C; --ok-soft:#E0F0E8;
+  --fail:#94282B; --fail-soft:#F7E4E4;
+  --warn:#846312; --warn-soft:#F5EEDB;
+  --shadow:0 1px 2px rgba(19,26,32,.05), 0 8px 24px -12px rgba(19,26,32,.18);
+  --display:'Archivo',ui-sans-serif,system-ui,sans-serif;
+  --body:'Source Serif 4',Georgia,'Times New Roman',serif;
+  --mono:'IBM Plex Mono',ui-monospace,'SFMono-Regular',Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#0E1519; --surface:#151E24; --surface-2:#1B262D; --sunken:#111A1F;
+    --ink:#E4EDF2; --ink-2:#A3B3BD; --ink-3:#7B8B96;
+    --rule:#26333B; --rule-strong:#384953;
+    --accent:#59A9CE; --accent-soft:#13303E;
+    --amber:#DB9550; --amber-soft:#33240F;
+    --ok:#63BE94; --ok-soft:#10281F;
+    --fail:#E58286; --fail-soft:#2E1517;
+    --warn:#D0AE55; --warn-soft:#2B2310;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 28px -14px rgba(0,0,0,.7);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0E1519; --surface:#151E24; --surface-2:#1B262D; --sunken:#111A1F;
+  --ink:#E4EDF2; --ink-2:#A3B3BD; --ink-3:#7B8B96;
+  --rule:#26333B; --rule-strong:#384953;
+  --accent:#59A9CE; --accent-soft:#13303E;
+  --amber:#DB9550; --amber-soft:#33240F;
+  --ok:#63BE94; --ok-soft:#10281F;
+  --fail:#E58286; --fail-soft:#2E1517;
+  --warn:#D0AE55; --warn-soft:#2B2310;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 28px -14px rgba(0,0,0,.7);
+}
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--ground); color:var(--ink);
+  font-family:var(--body); font-size:17px; line-height:1.65;
+  -webkit-font-smoothing:antialiased;
+}
+h1,h2,h3,h4{font-family:var(--display); text-wrap:balance; margin:0}
+code,kbd,pre,.mono{font-family:var(--mono)}
+a{color:var(--accent)}
+:focus-visible{outline:2px solid var(--accent); outline-offset:3px; border-radius:2px}
+
+/* ---------- shell ---------- */
+.shell{max-width:1240px; margin:0 auto; padding:0 24px}
+.layout{display:grid; grid-template-columns:236px minmax(0,1fr); gap:56px; align-items:start}
+@media (max-width:1000px){ .layout{grid-template-columns:1fr; gap:0} }
+
+/* ---------- masthead ---------- */
+.masthead{border-bottom:1px solid var(--rule-strong); background:var(--surface)}
+.masthead .shell{padding-top:52px; padding-bottom:40px}
+.eyebrow{
+  font-family:var(--mono); font-size:11.5px; font-weight:500;
+  letter-spacing:.14em; text-transform:uppercase; color:var(--accent);
+  display:flex; flex-wrap:wrap; gap:14px; align-items:center;
+}
+.eyebrow .dot{width:5px;height:5px;border-radius:50%;background:var(--amber);flex:none}
+h1{
+  font-size:clamp(34px,5.2vw,58px); font-weight:700; letter-spacing:-.022em;
+  line-height:1.03; margin:20px 0 0; max-width:19ch;
+}
+.standfirst{
+  font-size:clamp(18px,2.1vw,21px); color:var(--ink-2); max-width:60ch;
+  margin:22px 0 0; line-height:1.55;
+}
+.meta-grid{
+  display:grid; grid-template-columns:repeat(auto-fit,minmax(148px,1fr));
+  gap:1px; background:var(--rule); border:1px solid var(--rule);
+  margin-top:38px; border-radius:4px; overflow:hidden;
+}
+.meta-cell{background:var(--surface); padding:13px 16px}
+.meta-cell dt{
+  font-family:var(--mono); font-size:10.5px; letter-spacing:.1em;
+  text-transform:uppercase; color:var(--ink-3); margin:0 0 5px;
+}
+.meta-cell dd{margin:0; font-family:var(--mono); font-size:13.5px; color:var(--ink); font-weight:500}
+
+/* ---------- contents rail ---------- */
+.rail{position:sticky; top:0; max-height:100vh; overflow-y:auto; padding:40px 0 40px; font-family:var(--display)}
+@media (max-width:1000px){
+  .rail{position:static; max-height:none; border-bottom:1px solid var(--rule); margin-bottom:8px}
+}
+.rail h2{
+  font-size:10.5px; font-family:var(--mono); letter-spacing:.14em; text-transform:uppercase;
+  color:var(--ink-3); margin:0 0 14px; font-weight:500;
+}
+.rail ol{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:1px}
+.rail a{
+  display:grid; grid-template-columns:26px 1fr; gap:8px; align-items:baseline;
+  padding:5px 8px 5px 4px; text-decoration:none; color:var(--ink-2);
+  font-size:13.5px; line-height:1.35; border-radius:3px; border-left:2px solid transparent;
+}
+.rail a:hover{background:var(--surface-2); color:var(--ink)}
+.rail a.on{color:var(--ink); border-left-color:var(--accent); background:var(--surface-2); font-weight:600}
+.rail .n{font-family:var(--mono); font-size:11px; color:var(--ink-3); font-weight:500}
+.rail a.on .n{color:var(--accent)}
+.rail .grp{
+  font-family:var(--mono); font-size:10px; letter-spacing:.12em; text-transform:uppercase;
+  color:var(--ink-3); margin:16px 0 6px 4px; padding-top:12px; border-top:1px solid var(--rule);
+}
+.rail .grp:first-of-type{margin-top:0; padding-top:0; border-top:0}
+
+/* ---------- prose ---------- */
+main{padding:44px 0 120px; min-width:0}
+section{scroll-margin-top:20px; margin-bottom:60px}
+.sec-head{display:flex; gap:14px; align-items:baseline; margin-bottom:6px; padding-top:8px}
+.sec-num{
+  font-family:var(--mono); font-size:12.5px; font-weight:600; color:var(--accent);
+  letter-spacing:.04em; flex:none; padding-top:5px;
+}
+h2.sec-title{font-size:clamp(23px,2.7vw,30px); font-weight:600; letter-spacing:-.016em; line-height:1.18}
+.sec-sub{color:var(--ink-2); font-size:16px; margin:0 0 22px 40px; max-width:64ch}
+@media (max-width:640px){ .sec-sub{margin-left:0} }
+main p{max-width:66ch; margin:0 0 15px}
+main h3{
+  font-size:16.5px; font-weight:600; letter-spacing:-.005em; margin:30px 0 10px;
+  color:var(--ink);
+}
+main h4{
+  font-family:var(--mono); font-size:11.5px; font-weight:600; letter-spacing:.1em;
+  text-transform:uppercase; color:var(--ink-3); margin:24px 0 9px;
+}
+main ul,main ol{max-width:66ch; margin:0 0 15px; padding-left:20px}
+main li{margin-bottom:7px}
+main li::marker{color:var(--ink-3)}
+strong{font-weight:600}
+main code{
+  font-size:.855em; background:var(--sunken); padding:.12em .38em;
+  border-radius:3px; border:1px solid var(--rule);
+}
+hr.div{border:0; border-top:1px solid var(--rule); margin:34px 0}
+
+/* ---------- provenance badges ---------- */
+.badge{
+  display:inline-flex; align-items:center; gap:5px; vertical-align:middle;
+  font-family:var(--mono); font-size:10px; font-weight:600; letter-spacing:.09em;
+  text-transform:uppercase; padding:2.5px 7px; border-radius:3px; border:1px solid;
+  white-space:nowrap;
+}
+.badge::before{content:""; width:5px; height:5px; border-radius:50%; background:currentColor; flex:none}
+.b-meas{color:var(--ok); border-color:var(--ok); background:var(--ok-soft)}
+.b-calc{color:var(--accent); border-color:var(--accent); background:var(--accent-soft)}
+.b-assert{color:var(--warn); border-color:var(--warn); background:var(--warn-soft)}
+.b-open{color:var(--fail); border-color:var(--fail); background:var(--fail-soft)}
+
+/* ---------- panels ---------- */
+.panel{
+  background:var(--surface); border:1px solid var(--rule); border-radius:5px;
+  box-shadow:var(--shadow); margin:26px 0; overflow:hidden;
+}
+.panel-head{
+  padding:13px 18px; border-bottom:1px solid var(--rule); background:var(--surface-2);
+  display:flex; flex-wrap:wrap; gap:10px; align-items:center; justify-content:space-between;
+}
+.panel-head h3{
+  margin:0; font-family:var(--mono); font-size:11.5px; font-weight:600;
+  letter-spacing:.1em; text-transform:uppercase; color:var(--ink-2);
+}
+.panel-body{padding:18px}
+.panel-body>p:last-child{margin-bottom:0}
+
+/* ---------- tables ---------- */
+.tw{overflow-x:auto; -webkit-overflow-scrolling:touch}
+table{border-collapse:collapse; width:100%; font-size:14.5px; min-width:460px}
+th,td{text-align:left; padding:10px 14px; border-bottom:1px solid var(--rule); vertical-align:top}
+thead th{
+  font-family:var(--mono); font-size:10.5px; font-weight:600; letter-spacing:.1em;
+  text-transform:uppercase; color:var(--ink-3); background:var(--surface-2);
+  border-bottom:1px solid var(--rule-strong); white-space:nowrap;
+}
+tbody tr:last-child td{border-bottom:0}
+td.num,th.num{font-family:var(--mono); text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap}
+td .mono,td code{font-size:13px}
+tbody tr:hover{background:var(--surface-2)}
+
+/* trial matrix: severity stripe encodes outcome in form, not colour alone */
+.trials td:first-child{border-left:3px solid transparent; font-weight:600; font-size:14px}
+.trials tr.stable td:first-child{border-left-color:var(--ok)}
+.trials tr.broken td:first-child{border-left-color:var(--fail)}
+.verdict{display:inline-flex; align-items:center; gap:6px; font-family:var(--mono); font-size:12px; font-weight:600}
+.verdict::before{
+  content:""; width:9px; height:9px; flex:none; border:1.5px solid currentColor;
+}
+.v-ok{color:var(--ok)} .v-ok::before{background:currentColor; border-radius:50%}
+.v-bad{color:var(--fail)} .v-bad::before{transform:rotate(45deg)}
+
+/* ---------- code ---------- */
+pre{
+  background:var(--sunken); border:1px solid var(--rule); border-radius:4px;
+  padding:14px 16px; overflow-x:auto; font-size:13px; line-height:1.6; margin:16px 0;
+  color:var(--ink);
+}
+pre code{background:none; border:0; padding:0; font-size:inherit}
+
+/* ---------- callouts ---------- */
+.note{
+  border-left:3px solid var(--accent); background:var(--accent-soft);
+  padding:14px 18px; margin:22px 0; border-radius:0 4px 4px 0; max-width:70ch;
+}
+.note.warn{border-left-color:var(--amber); background:var(--amber-soft)}
+.note.alarm{border-left-color:var(--fail); background:var(--fail-soft)}
+.note p{margin:0 0 9px; font-size:16px}
+.note p:last-child{margin:0}
+.note .lbl{
+  font-family:var(--mono); font-size:10.5px; font-weight:600; letter-spacing:.1em;
+  text-transform:uppercase; display:block; margin-bottom:6px; color:var(--accent);
+}
+.note.warn .lbl{color:var(--amber)}
+.note.alarm .lbl{color:var(--fail)}
+
+/* ---------- figures ---------- */
+figure{margin:26px 0; background:var(--surface); border:1px solid var(--rule); border-radius:5px; padding:22px 20px 16px}
+figure svg{display:block; width:100%; max-width:100%; height:auto; color:var(--ink-2)}
+figcaption{
+  margin-top:16px; padding-top:13px; border-top:1px solid var(--rule);
+  font-size:14px; color:var(--ink-2); max-width:70ch;
+}
+
+/* ---------- stat strip ---------- */
+.stats{display:grid; grid-template-columns:repeat(auto-fit,minmax(132px,1fr)); gap:1px; background:var(--rule); border:1px solid var(--rule); border-radius:4px; overflow:hidden; margin:24px 0}
+.stat{background:var(--surface); padding:15px 16px}
+.stat .v{font-family:var(--display); font-size:25px; font-weight:700; letter-spacing:-.02em; font-variant-numeric:tabular-nums; line-height:1.1}
+.stat .k{font-family:var(--mono); font-size:10.5px; letter-spacing:.09em; text-transform:uppercase; color:var(--ink-3); margin-top:6px}
+.stat.hl .v{color:var(--accent)}
+.stat.amb .v{color:var(--amber)}
+
+/* ---------- defect list ---------- */
+.defects{list-style:none; padding:0; margin:20px 0; display:flex; flex-direction:column; gap:1px; background:var(--rule); border:1px solid var(--rule); border-radius:4px; overflow:hidden; max-width:none}
+.defects li{background:var(--surface); padding:15px 18px; margin:0; display:grid; grid-template-columns:30px 1fr; gap:14px}
+.defects .dn{font-family:var(--mono); font-size:12px; font-weight:600; color:var(--accent); padding-top:2px}
+.defects .dt{font-weight:600; font-size:16px; display:block; margin-bottom:4px}
+.defects .dc{font-size:14.5px; color:var(--ink-2); display:block; margin-top:6px}
+.defects .dc b{font-family:var(--mono); font-size:11px; letter-spacing:.07em; text-transform:uppercase; color:var(--ink-3); font-weight:600}
+
+/* ---------- footer ---------- */
+footer{border-top:1px solid var(--rule-strong); background:var(--surface); padding:36px 0 60px; font-size:14.5px; color:var(--ink-2)}
+footer .shell{display:flex; flex-wrap:wrap; gap:26px; justify-content:space-between; align-items:flex-start}
+footer p{max-width:56ch; margin:0}
+footer .mono{font-size:12.5px; color:var(--ink-3)}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+
+<header class="masthead">
+  <div class="shell">
+    <div class="eyebrow">
+      <span>Field Report</span><span class="dot"></span>
+      <span>IoT Meat-Freshness Monitoring</span><span class="dot"></span>
+      <span>Recorded 2026-09-01</span>
+    </div>
+    <h1>What a BLE store-and-forward link actually costs</h1>
+    <p class="standfirst">
+      Moving an ESP32 sensor node off WiFi and onto Bluetooth Low Energy, with the
+      Raspberry Pi gateway — not the cloud — as the point of durability. The protocol was
+      straightforward to specify. Making it hold on real hardware took five defects, two
+      corrupted diagnostic channels, and a set of GATT behaviours that no specification
+      predicts. This is the complete record.
+    </p>
+    <dl class="meta-grid">
+      <div class="meta-cell"><dt>Node</dt><dd>ESP32-WROOM-32</dd></div>
+      <div class="meta-cell"><dt>Gateway</dt><dd>Raspberry Pi 5</dd></div>
+      <div class="meta-cell"><dt>Central stack</dt><dd>BlueZ 5.82</dd></div>
+      <div class="meta-cell"><dt>Peripheral stack</dt><dd>NimBLE 2.2.x</dd></div>
+      <div class="meta-cell"><dt>Readings ingested</dt><dd>1,869 over BLE</dd></div>
+      <div class="meta-cell"><dt>Separation</dt><dd>≈25 cm, −31 dBm</dd></div>
+    </dl>
+  </div>
+</header>
+
+<div class="shell">
+<div class="layout">
+
+<nav class="rail" aria-label="Contents">
+  <h2>Contents</h2>
+  <p class="grp">The finding</p>
+  <ol>
+    <li><a href="#s1"><span class="n">01</span><span>Writes are the fragile half</span></a></li>
+    <li><a href="#s2"><span class="n">02</span><span>MTU reporting misleads</span></a></li>
+    <li><a href="#s3"><span class="n">03</span><span>The stale GATT cache</span></a></li>
+    <li><a href="#s4"><span class="n">04</span><span>Reading disconnect codes</span></a></li>
+    <li><a href="#s5"><span class="n">05</span><span>Residual churn, undiagnosed</span></a></li>
+  </ol>
+  <p class="grp">The system</p>
+  <ol>
+    <li><a href="#s6"><span class="n">06</span><span>Why WiFi was replaced</span></a></li>
+    <li><a href="#s7"><span class="n">07</span><span>The BLE architecture</span></a></li>
+    <li><a href="#s8"><span class="n">08</span><span>Protocol specification</span></a></li>
+    <li><a href="#s9"><span class="n">09</span><span>The delivery guarantee</span></a></li>
+    <li><a href="#s10"><span class="n">10</span><span>Time without a clock</span></a></li>
+    <li><a href="#s11"><span class="n">11</span><span>Flash-wear budget</span></a></li>
+  </ol>
+  <p class="grp">Instrument</p>
+  <ol>
+    <li><a href="#s12"><span class="n">12</span><span>Hardware inventory</span></a></li>
+    <li><a href="#s13"><span class="n">13</span><span>Software versions</span></a></li>
+    <li><a href="#s14"><span class="n">14</span><span>Gas sensing circuit</span></a></li>
+    <li><a href="#s15"><span class="n">15</span><span>Classification thresholds</span></a></li>
+  </ol>
+  <p class="grp">Operations</p>
+  <ol>
+    <li><a href="#s16"><span class="n">16</span><span>Nine durability defects</span></a></li>
+    <li><a href="#s17"><span class="n">17</span><span>Corrupted diagnostics</span></a></li>
+    <li><a href="#s18"><span class="n">18</span><span>Storage economics</span></a></li>
+    <li><a href="#s19"><span class="n">19</span><span>Pipeline independence</span></a></li>
+    <li><a href="#s20"><span class="n">20</span><span>Failure envelope</span></a></li>
+    <li><a href="#s21"><span class="n">21</span><span>Results and dataset</span></a></li>
+    <li><a href="#s22"><span class="n">22</span><span>Deployment</span></a></li>
+  </ol>
+  <p class="grp">For publication</p>
+  <ol>
+    <li><a href="#s23"><span class="n">23</span><span>Limitations</span></a></li>
+    <li><a href="#s24"><span class="n">24</span><span>Defensible claims</span></a></li>
+    <li><a href="#s25"><span class="n">25</span><span>Open questions</span></a></li>
+    <li><a href="#s26"><span class="n">26</span><span>Reproducibility</span></a></li>
+  </ol>
+</nav>
+
+<main>
+
+<div class="note">
+  <span class="lbl">How to read the evidence markers</span>
+  <p>Every claim in this report carries its provenance, because the distinction mattered
+  repeatedly during the work:
+  <span class="badge b-meas">Measured</span> observed on this hardware;
+  <span class="badge b-calc">Calculated</span> derived from measured unit costs;
+  <span class="badge b-assert">By code path</span> reasoned from the implementation, not exercised;
+  <span class="badge b-open">Unresolved</span> known behaviour without a root cause.</p>
+</div>
+
+<section id="s1">
+  <div class="sec-head"><span class="sec-num">01</span><h2 class="sec-title">Notification delivery is robust. GATT writes are not.</h2></div>
+  <p class="sec-sub">The single most transferable result from the project, and the one that cost the most time to isolate.</p>
+
+  <p>Every obstacle in this section presented identically at the symptom level:
+  <em>&ldquo;BLE is flaky, the link keeps dropping.&rdquo;</em> None of them was a radio problem.
+  RSSI held between &minus;31 and &minus;33 dBm throughout, at 25 cm separation, with a
+  negotiated ATT MTU of 247 bytes and payloads of 146&ndash;163 bytes — one notification per
+  reading, no fragmentation. The link had enormous margin. It still would not stay up.</p>
+
+  <p>The causes were all in how the two stacks handled <strong>writes</strong>. Each row below is a
+  controlled trial holding everything else fixed.</p>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h3>GATT write behaviour · BlueZ 5.82 ↔ NimBLE 2.2.x</h3>
+      <span class="badge b-meas">Measured</span>
+    </div>
+    <div class="tw">
+      <table class="trials">
+        <thead>
+          <tr><th>Interaction pattern</th><th>Outcome</th><th>Observed detail</th></tr>
+        </thead>
+        <tbody>
+          <tr class="stable">
+            <td>Subscribe, never write</td>
+            <td><span class="verdict v-ok">Stable</span></td>
+            <td>Held one connection for the full 80&nbsp;s window, streamed continuously</td>
+          </tr>
+          <tr class="stable">
+            <td>Write <em>with</em> response, after subscribing</td>
+            <td><span class="verdict v-ok">Stable</span></td>
+            <td>Single acknowledged write, no disruption</td>
+          </tr>
+          <tr class="broken">
+            <td>Write <em>without</em> response</td>
+            <td><span class="verdict v-bad">Fatal</span></td>
+            <td><code>TimeoutError</code>; link dies. Routes through BlueZ <code>AcquireWrite</code> fd path</td>
+          </tr>
+          <tr class="broken">
+            <td>Write <em>before</em> <code>start_notify</code></td>
+            <td><span class="verdict v-bad">Silent</span></td>
+            <td>Notifications never delivered for the whole connection. No error anywhere</td>
+          </tr>
+          <tr class="broken">
+            <td>One ACK write per reading, sustained</td>
+            <td><span class="verdict v-bad">Fatal</span></td>
+            <td><code>ATT 0x0E</code> &mdash; <em>GATT Protocol Error: Unlikely Error</em>, then disconnect</td>
+          </tr>
+          <tr class="broken">
+            <td>Two concurrent writes on one connection</td>
+            <td><span class="verdict v-bad">Fatal</span></td>
+            <td>Link drops ≈2&nbsp;s later</td>
+          </tr>
+          <tr class="broken">
+            <td>Write issued from inside a notification callback</td>
+            <td><span class="verdict v-bad">Fatal</span></td>
+            <td>Deadlocks BlueZ D-Bus dispatch</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <p>The contrast is stark. Under a per-reading acknowledgement regime this hardware managed
+  <strong>one reading per connection</strong> before tearing down. With writes minimised, the same
+  hardware held a single connection for the entire test window and streamed 50+ notifications
+  &mdash; <code>stored=51 duplicates=5</code>, zero disconnects.</p>
+
+  <h3>Five rules that follow</h3>
+  <ol>
+    <li><strong>Use <code>response=True</code> for every write.</strong> This is counter-intuitive:
+    write-without-response is the lighter operation and the obvious choice for a high-rate
+    acknowledgement channel. It is also the one that kills the link.</li>
+    <li><strong>Subscribe before writing anything.</strong> A write issued before
+    <code>StartNotify</code> leaves BlueZ silently never delivering notifications. The peripheral
+    transmits &mdash; confirmed on its serial console &mdash; and the central&rsquo;s callback never
+    fires. Nothing raises.</li>
+    <li><strong>Acknowledge cumulatively and rate-limit.</strong> One write per second clearing
+    everything up to a sequence number, rather than one write per reading.</li>
+    <li><strong>Serialise all writes behind one lock.</strong> Two writes racing on a single
+    connection drop it about two seconds later.</li>
+    <li><strong>Never write from inside a notification callback.</strong> It runs on BlueZ&rsquo;s
+    D-Bus dispatch path. The final implementation has the callback do nothing but
+    <code>queue.put_nowait(bytes(raw))</code>, with a separate worker performing storage and
+    acknowledgement.</li>
+  </ol>
+
+  <div class="note warn">
+    <span class="lbl">Scope of this claim</span>
+    <p>These are observations on one widely-deployed stack pairing &mdash; BlueZ 5.82 with
+    bleak 3.0.2 against NimBLE-Arduino 2.2.x. They may not generalise to Android, iOS or
+    Windows centrals, or to Bluedroid on the peripheral side. Frame them as
+    <em>&ldquo;observed on this Linux stack&rdquo;</em>, not as universal BLE behaviour. Testing
+    whether they reproduce under Bluedroid is the fastest way to determine whether this is a
+    NimBLE issue, a BlueZ issue, or an interaction between them.</p>
+  </div>
+</section>
+
+<section id="s2">
+  <div class="sec-head"><span class="sec-num">02</span><h2 class="sec-title">The MTU your client reports is not the MTU you have</h2></div>
+
+  <p><code>bleak</code> reported <code>client.mtu_size</code> as <strong>23</strong> &mdash; the ATT
+  default &mdash; while the peripheral&rsquo;s own <code>onMTUChange</code> callback reported a
+  negotiated <strong>247</strong>, and BlueZ&rsquo;s D-Bus characteristic properties independently
+  showed <code>MTU: 247</code>.</p>
+
+  <p>The library emits <code>UserWarning: Using default MTU value. Call _acquire_mtu()&hellip;</code>.
+  The value is <em>unqueried</em>, not <em>negotiated down to 23</em>. Considerable design effort went
+  into fitting a reading into a 20-byte payload &mdash; scaled 16-bit integers, chunking schemes
+  &mdash; against a constraint that did not exist.</p>
+
+  <div class="note">
+    <span class="lbl">Rule</span>
+    <p>Trust the peripheral&rsquo;s negotiated value or BlueZ&rsquo;s <code>MTU</code> property.
+    Do not trust the client library&rsquo;s default-valued attribute.</p>
+  </div>
+</section>
+
+<section id="s3">
+  <div class="sec-head"><span class="sec-num">03</span><h2 class="sec-title">BlueZ caches the GATT database and never invalidates it</h2></div>
+  <p class="sec-sub">A host-side cache producing a data-integrity failure invisible to the application.</p>
+
+  <p>BlueZ stores a resolved copy of each peer&rsquo;s attribute table under
+  <code>/var/lib/bluetooth/&lt;adapter&gt;/cache/&lt;device&gt;</code>. <strong>Any firmware change that
+  alters the characteristic layout invalidates that cache, and BlueZ does not detect the
+  change.</strong></p>
+
+  <p>Stale handle mappings produced a <em>phantom acknowledgement</em>. The peripheral logged:</p>
+
+  <pre><code>[ACK] seq&lt;=1004 confirmed — 1 cleared, 232 still queued</code></pre>
+
+  <p>for a write the gateway had never issued. A queued reading was silently discarded. This is
+  data loss caused entirely by host-side caching, with no application-visible cause.</p>
+
+  <h4>Defensive mitigation, now in firmware</h4>
+  <p>The ACK handler rejects any write that is not exactly four bytes, and rejects any sequence
+  number above the highest actually transmitted (<code>lastSentSeq</code>). A stale or spurious
+  write can no longer discard queued data.</p>
+
+  <h4>Operational mitigation, after any GATT profile change</h4>
+  <pre><code>bluetoothctl remove &lt;NODE_MAC&gt;
+sudo rm -rf /var/lib/bluetooth/&lt;ADAPTER_MAC&gt;/cache/&lt;NODE_MAC&gt;
+sudo systemctl restart bluetooth</code></pre>
+</section>
+
+<section id="s4">
+  <div class="sec-head"><span class="sec-num">04</span><h2 class="sec-title">Disconnect reason codes point at the guilty side</h2></div>
+
+  <p>NimBLE encodes <code>BLE_HS_ERR_HCI_BASE = 0x200</code> plus the HCI error:</p>
+
+  <div class="panel">
+    <div class="tw"><table>
+      <thead><tr><th class="num">NimBLE</th><th class="num">HCI</th><th>Meaning</th><th>Points at</th></tr></thead>
+      <tbody>
+        <tr><td class="num"><code>0x208</code></td><td class="num"><code>0x08</code></td><td>Supervision timeout</td><td>Link genuinely lost</td></tr>
+        <tr><td class="num"><code>0x213</code></td><td class="num"><code>0x13</code></td><td>Remote user terminated</td><td>The <em>gateway</em> ended it</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <p>Distinguishing these was essential. Seeing <code>0x213</code> proved the Pi side was closing the
+  connection and redirected the investigation away from radio conditions &mdash; which is exactly
+  where a &ldquo;flaky BLE&rdquo; symptom naturally sends you first, and where several hours would
+  otherwise have gone.</p>
+</section>
+
+<section id="s5">
+  <div class="sec-head"><span class="sec-num">05</span><h2 class="sec-title">What remains unexplained</h2></div>
+
+  <p>Under sustained load the link still re-establishes roughly every 30 seconds.
+  <span class="badge b-open">Unresolved</span></p>
+
+  <p>This is not a data-loss path. Nothing leaves the node&rsquo;s queue until acknowledged, and
+  duplicates collapse on the <code>UNIQUE</code> index &mdash; the reconnection overlap is visible in
+  the data as <code>duplicates=5</code> against <code>stored=51</code>, absorbed exactly as designed.
+  Measured throughput comfortably exceeds the production rate: <strong>79 readings ingested in a
+  180-second window while the node generated 60</strong>, so backlogs drain rather than grow.</p>
+
+  <p>But it is unexplained, and that is worth disclosing rather than papering over. Candidate
+  hypotheses not yet eliminated: connection-parameter negotiation; WiFi/BLE coexistence on the
+  Pi 5&rsquo;s shared 2.4 GHz front-end, since WiFi is active for the uplink; NimBLE host-task
+  starvation during ADC bursts (32 samples × 3 channels ≈ 26 ms per cycle); or BlueZ state
+  degradation across many reconnect cycles. A <code>btmon</code> HCI capture correlated against the
+  node&rsquo;s serial log across a single disconnect would settle it.</p>
+</section>
+
+<section id="s6">
+  <div class="sec-head"><span class="sec-num">06</span><h2 class="sec-title">Why the WiFi architecture had to go</h2></div>
+  <p class="sec-sub">The failure was architectural, not implementational — which is the more useful finding.</p>
+
+  <p>In the original design the ESP32 held WiFi credentials in EEPROM, exposed a SoftAP captive
+  portal for provisioning, obtained wall-clock time over NTP, and POSTed JSON directly to the
+  cloud over TLS. The Raspberry Pi polled the server&rsquo;s <code>/history</code> endpoint every five
+  seconds and mirrored new rows into local SQLite for the dashboard.</p>
+
+  <p>The cloud server therefore sat <strong>upstream</strong> of the Pi. The Pi could not obtain data
+  the server had not received &mdash; even though the node and the gateway were on the same bench,
+  25 cm apart. A server or internet outage meant no data reached the Pi at all.</p>
+
+  <figure>
+    <svg viewBox="0 0 760 340" role="img" aria-label="Two architectures compared. In the WiFi design the wide-area link sits between the sensor and the first durable store, so an outage there stops data reaching the gateway. In the BLE design the gateway holds the durable store and the wide-area link sits after it, so an outage only grows a queue.">
+      <defs>
+        <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+        </marker>
+        <marker id="arA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#0B5F87"/>
+        </marker>
+      </defs>
+
+      <text x="0" y="14" font-size="11" font-weight="600" letter-spacing="1.4" fill="currentColor">BEFORE &#183; WIFI / HTTP</text>
+      <line x1="0" y1="24" x2="760" y2="24" stroke="currentColor" stroke-width="1" opacity=".25"/>
+
+      <rect x="0" y="48" width="120" height="52" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <text x="60" y="70" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">ESP32</text>
+      <text x="60" y="86" text-anchor="middle" font-size="10.5" fill="currentColor" opacity=".7">60 s RAM buffer</text>
+
+      <line x1="120" y1="74" x2="278" y2="74" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"/>
+      <text x="199" y="66" text-anchor="middle" font-size="10.5" fill="currentColor">WiFi / HTTPS</text>
+      <line x1="192" y1="62" x2="206" y2="88" stroke="#94282B" stroke-width="2.2"/>
+      <line x1="206" y1="62" x2="192" y2="88" stroke="#94282B" stroke-width="2.2"/>
+
+      <rect x="280" y="48" width="130" height="52" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <text x="345" y="70" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">Cloud API</text>
+      <text x="345" y="86" text-anchor="middle" font-size="10.5" fill="currentColor" opacity=".7">source of truth</text>
+
+      <line x1="410" y1="74" x2="568" y2="74" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"/>
+      <text x="489" y="66" text-anchor="middle" font-size="10.5" fill="currentColor">Pi polls /history &#183; 5 s</text>
+
+      <rect x="570" y="48" width="130" height="52" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <text x="635" y="70" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">Pi + SQLite</text>
+      <text x="635" y="86" text-anchor="middle" font-size="10.5" fill="currentColor" opacity=".7">mirror only</text>
+
+      <text x="199" y="118" text-anchor="middle" font-size="10.5" font-weight="600" fill="#94282B">outage here starves everything downstream</text>
+
+      <text x="0" y="182" font-size="11" font-weight="600" letter-spacing="1.4" fill="#0B5F87">AFTER &#183; BLE, GATEWAY-OWNED DURABILITY</text>
+      <line x1="0" y1="192" x2="760" y2="192" stroke="#0B5F87" stroke-width="1" opacity=".4"/>
+
+      <rect x="0" y="216" width="120" height="52" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <text x="60" y="238" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">ESP32</text>
+      <text x="60" y="254" text-anchor="middle" font-size="10.5" fill="currentColor" opacity=".7">1 h queue</text>
+
+      <line x1="120" y1="242" x2="278" y2="242" stroke="#0B5F87" stroke-width="1.6" marker-end="url(#arA)"/>
+      <text x="199" y="234" text-anchor="middle" font-size="10.5" fill="#0B5F87">BLE &#183; held until acked</text>
+
+      <rect x="280" y="210" width="150" height="64" rx="3" fill="none" stroke="#0B5F87" stroke-width="2.2"/>
+      <text x="355" y="234" text-anchor="middle" font-size="12" font-weight="600" fill="#0B5F87">Pi + SQLite</text>
+      <text x="355" y="250" text-anchor="middle" font-size="10.5" fill="#0B5F87">system of record</text>
+      <text x="355" y="265" text-anchor="middle" font-size="10.5" fill="#0B5F87" opacity=".8">durability boundary</text>
+
+      <line x1="430" y1="242" x2="588" y2="242" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"/>
+      <text x="509" y="234" text-anchor="middle" font-size="10.5" fill="currentColor">uploads when reachable</text>
+      <line x1="502" y1="230" x2="516" y2="256" stroke="#94282B" stroke-width="2.2"/>
+      <line x1="516" y1="230" x2="502" y2="256" stroke="#94282B" stroke-width="2.2"/>
+
+      <rect x="590" y="216" width="130" height="52" rx="3" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <text x="655" y="238" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor">Cloud API</text>
+      <text x="655" y="254" text-anchor="middle" font-size="10.5" fill="currentColor" opacity=".7">backup</text>
+
+      <text x="509" y="286" text-anchor="middle" font-size="10.5" font-weight="600" fill="#0B5F87">outage here only grows a queue</text>
+      <text x="0" y="318" font-size="10.5" fill="currentColor" opacity=".75">The wide-area link moves from before the durable store to after it. That single reordering is the whole change.</text>
+    </svg>
+    <figcaption>Placing the wide-area link between the sensor and the first durable store makes
+    system availability a function of WAN availability. Moving the durable store to the gateway
+    reduces a WAN outage from data loss to upload latency.</figcaption>
+  </figure>
+
+  <h3>The buffer was nowhere near adequate</h3>
+  <p>The node&rsquo;s offline queue was <code>MAX_QUEUE = 20</code> entries in RAM, drained three per
+  cycle. At a 3-second sampling interval that is <strong>sixty seconds</strong> of protection, and it
+  was volatile &mdash; a reboot lost it. Beyond 60 s the firmware shifted the ring and dropped the
+  oldest entry, incrementing a <code>queueDropCount</code> that nothing acted on.</p>
+
+  <h3>Secondary couplings, all removed by the change</h3>
+  <ul>
+    <li><strong>Timestamps depended on NTP, which depended on WiFi.</strong> With no WiFi the
+    firmware emitted the literal string <code>1970-01-01T00:00:00Z</code>. Since deduplication and
+    bookmarking keyed on timestamps, this was actively corrupting.</li>
+    <li><strong>Identity was assigned by the server.</strong> Deduplication used a server-issued
+    <code>source_id</code>, so the Pi could only identify a reading <em>after</em> the server had
+    accepted it.</li>
+    <li><strong>Server ids could reset</strong> on a database restore, which the client defended
+    against with a 24-hour lookback window &mdash; complexity caused purely by the server owning
+    identity.</li>
+  </ul>
+
+  <div class="note">
+    <span class="lbl">Generalisable</span>
+    <p>&ldquo;Device &rarr; cloud &rarr; dashboard&rdquo; is the reference topology in most IoT
+    material, and it rarely asks what holds the data when the middle link is down. Where the
+    first durable store sits is the architectural decision; everything else is detail.</p>
+  </div>
+</section>
+
+<section id="s7">
+  <div class="sec-head"><span class="sec-num">07</span><h2 class="sec-title">What removing WiFi entirely bought and cost</h2></div>
+
+  <p>The node has no WiFi, no HTTP, no TLS and no NTP. BLE is its only link, and the gateway
+  25 cm away is its only consumer.</p>
+
+  <ul>
+    <li><strong>No NTP.</strong> Solved with two independent mechanisms (&sect;10) rather than by
+    adding an RTC &mdash; which would have been the obvious hardware answer but adds a part, a
+    battery, and a failure mode.</li>
+    <li><strong>Self-assigned identity.</strong> The node issues its own monotonic sequence
+    numbers, so a reading has an identity from the moment of capture rather than from the moment a
+    server accepts it.</li>
+    <li><strong>No provisioning portal.</strong> Roughly 460 lines of SoftAP, DNS and captive-portal
+    code deleted, along with the EEPROM credential store.</li>
+    <li><strong>The <code>wifi_rssi</code> field became meaningless.</strong> It now carries BLE link
+    RSSI, which keeps the dashboard&rsquo;s signal display working, with
+    <code>sensor_status.link = "ble"</code> recorded per row so the provenance is explicit in the
+    data rather than implied.</li>
+  </ul>
+
+  <p>Dropping the entire WiFi/TLS/portal stack and adding NimBLE was close to footprint-neutral in
+  flash while freeing the RAM budget that the reading queue consumes. NimBLE rather than the
+  bundled Bluedroid stack was deliberate: Bluedroid is substantially larger in both flash and RAM,
+  and RAM headroom is precisely what the queue needs.</p>
+
+  <div class="stats">
+    <div class="stat"><div class="v">28.9%</div><div class="k">RAM used</div></div>
+    <div class="stat"><div class="v">47.8%</div><div class="k">Flash used</div></div>
+    <div class="stat hl"><div class="v">1,200</div><div class="k">Queue capacity</div></div>
+    <div class="stat hl"><div class="v">1 h</div><div class="k">Node buffer</div></div>
+    <div class="stat amb"><div class="v">0</div><div class="k">Flash writes idle</div></div>
+  </div>
+</section>
+
+<section id="s8">
+  <div class="sec-head"><span class="sec-num">08</span><h2 class="sec-title">Protocol specification</h2></div>
+
+  <p>Service UUID <code>19859e41-e7f2-41cc-b771-2b33ce845fb2</code>, advertised as
+  <code>MeatNode</code>. The gateway matches on service UUID first and falls back to name, so a
+  stray advertiser cannot be mistaken for the sensor; an optional <code>BLE_DEVICE_ADDRESS</code>
+  pins the MAC outright.</p>
+
+  <div class="panel">
+    <div class="panel-head"><h3>GATT characteristics</h3></div>
+    <div class="tw"><table>
+      <thead><tr><th>Role</th><th>UUID</th><th>Properties</th><th>Direction</th><th>Payload</th></tr></thead>
+      <tbody>
+        <tr><td><strong>DATA</strong></td><td><code>0a09c96d…a695</code></td><td>NOTIFY</td><td>node &rarr; Pi</td><td>compact JSON, one reading</td></tr>
+        <tr><td><strong>ACK</strong></td><td><code>8b4d8427…b4ea</code></td><td>WRITE</td><td>Pi &rarr; node</td><td>uint32 LE, cumulative sequence</td></tr>
+        <tr><td><strong>TIME</strong></td><td><code>fc8acb7e…5092</code></td><td>WRITE</td><td>Pi &rarr; node</td><td>uint64 LE, epoch milliseconds</td></tr>
+        <tr><td><strong>STATUS</strong></td><td><code>33db1a8b…ef01</code></td><td>READ</td><td>Pi &larr; node</td><td>JSON diagnostics</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <p>Single-character keys keep a full reading inside one ATT notification. Observed payloads
+  146&ndash;163 bytes against 244 usable at the negotiated MTU.</p>
+
+  <pre><code>{"q":4000,"ag":188708,"ep":1788266426,"t":35.79,"h":68.36,"p":1002.29,
+ "c":8.58,"s":4.25,"n":1.66,"l":"EXCELLENT","b":1}</code></pre>
+
+  <p><code>q</code> sequence &middot; <code>ag</code> age in ms since capture &middot;
+  <code>ep</code> epoch seconds, 0 when the node has no clock &middot; <code>t</code>/<code>h</code>/<code>p</code>
+  temperature, humidity, pressure &middot; <code>c</code>/<code>s</code>/<code>n</code> VOC, H&#8322;S,
+  NH&#8323; in ppm &middot; <code>l</code> quality label &middot; <code>b</code> BME280 present &middot;
+  <code>r</code> present when the reading survived a node reboot.</p>
+
+  <h4>Queue parameters</h4>
+  <div class="tw"><table>
+    <tbody>
+      <tr><td><code>QUEUE_CAPACITY</code></td><td class="num">1200</td><td>readings in RAM &mdash; 1 hour at 3 s, ≈53 KB</td></tr>
+      <tr><td><code>QUEUE_PERSIST_MAX</code></td><td class="num">128</td><td>checkpointed to NVS &mdash; 5,632 bytes</td></tr>
+      <tr><td><code>QUEUE_PERSIST_THRESHOLD</code></td><td class="num">20</td><td>backlog before checkpointing begins</td></tr>
+      <tr><td><code>QUEUE_PERSIST_MIN_GAP_MS</code></td><td class="num">60,000</td><td>at most one flash write per minute</td></tr>
+      <tr><td><code>ACK_TIMEOUT_MS</code></td><td class="num">4,000</td><td>retransmit an unacknowledged reading</td></tr>
+      <tr><td><code>SEND_GAP_MS</code></td><td class="num">60</td><td>spacing while draining a backlog</td></tr>
+      <tr><td><code>SEQ_BLOCK</code></td><td class="num">1000</td><td>sequence numbers reserved per NVS write</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section id="s9">
+  <div class="sec-head"><span class="sec-num">09</span><h2 class="sec-title">The delivery guarantee, stated precisely</h2></div>
+  <p class="sec-sub">At-least-once on the wire, exactly-once in the database. The ordering is the entire guarantee.</p>
+
+  <figure>
+    <svg viewBox="0 0 760 356" role="img" aria-label="Sequence showing that the gateway commits a reading to SQLite and queues its upload job before writing the acknowledgement back to the node, so an acknowledgement always means durably stored rather than merely received.">
+      <defs>
+        <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+        </marker>
+        <marker id="ar2A" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#0B5F87"/>
+        </marker>
+      </defs>
+
+      <rect x="0" y="222" width="760" height="96" fill="#0B5F87" opacity=".07"/>
+      <line x1="0" y1="222" x2="760" y2="222" stroke="#0B5F87" stroke-width="1" stroke-dasharray="4 3" opacity=".65"/>
+      <text x="756" y="238" text-anchor="end" font-size="10.5" font-weight="600" fill="#0B5F87">durable from here</text>
+
+      <text x="118" y="18" text-anchor="middle" font-size="11" font-weight="600" letter-spacing="1.2" fill="currentColor">NODE</text>
+      <text x="620" y="18" text-anchor="middle" font-size="11" font-weight="600" letter-spacing="1.2" fill="currentColor">GATEWAY</text>
+      <line x1="118" y1="28" x2="118" y2="346" stroke="currentColor" stroke-width="1" opacity=".3"/>
+      <line x1="620" y1="28" x2="620" y2="346" stroke="currentColor" stroke-width="1" opacity=".3"/>
+
+      <rect x="28" y="44" width="180" height="34" rx="3" fill="none" stroke="currentColor" stroke-width="1.3"/>
+      <text x="118" y="65" text-anchor="middle" font-size="11.5" fill="currentColor">assign seq, hold in queue</text>
+      <text x="12" y="65" font-size="11" font-weight="600" fill="#0B5F87">1</text>
+
+      <line x1="210" y1="108" x2="528" y2="108" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar2)"/>
+      <text x="369" y="100" text-anchor="middle" font-size="11.5" fill="currentColor">notify(reading) &#183; oldest unacked, repeats</text>
+      <text x="12" y="112" font-size="11" font-weight="600" fill="#0B5F87">2</text>
+
+      <rect x="530" y="140" width="200" height="34" rx="3" fill="none" stroke="currentColor" stroke-width="1.3"/>
+      <text x="630" y="161" text-anchor="middle" font-size="11.5" fill="currentColor">commit row to SQLite</text>
+      <text x="12" y="161" font-size="11" font-weight="600" fill="#0B5F87">3</text>
+
+      <rect x="530" y="184" width="200" height="34" rx="3" fill="none" stroke="currentColor" stroke-width="1.3"/>
+      <text x="630" y="205" text-anchor="middle" font-size="11.5" fill="currentColor">commit upload job</text>
+      <text x="12" y="205" font-size="11" font-weight="600" fill="#0B5F87">4</text>
+
+      <line x1="528" y1="256" x2="212" y2="256" stroke="#0B5F87" stroke-width="2.2" marker-end="url(#ar2A)"/>
+      <text x="370" y="248" text-anchor="middle" font-size="11.5" font-weight="600" fill="#0B5F87">ACK(seq) &#183; cumulative, batched 1 s</text>
+      <text x="12" y="260" font-size="11" font-weight="600" fill="#0B5F87">5</text>
+
+      <rect x="28" y="290" width="180" height="34" rx="3" fill="none" stroke="#0B5F87" stroke-width="1.6"/>
+      <text x="118" y="311" text-anchor="middle" font-size="11.5" fill="#0B5F87">drop all seq &#8804; acked</text>
+      <text x="12" y="311" font-size="11" font-weight="600" fill="#0B5F87">6</text>
+
+      <text x="240" y="311" font-size="10.5" fill="currentColor" opacity=".75">Crash anywhere before step 5 &rarr; retransmission, absorbed by UNIQUE(source_id).</text>
+    </svg>
+    <figcaption>Step 5 coming last is what makes an acknowledgement mean &ldquo;durably on
+    disk&rdquo; rather than &ldquo;received&rdquo;. Reverse steps 3 and 5 and a gateway crash silently
+    loses readings the node has already discarded.</figcaption>
+  </figure>
+
+  <p>Duplicates from a retransmission collapse on the <code>UNIQUE</code> index over
+  <code>sensor_readings.source_id</code>, written with <code>INSERT OR IGNORE</code>. The
+  <code>source_id</code> is <code>"&lt;device_id&gt;:&lt;seq&gt;"</code>, stable across retransmits by
+  construction &mdash; which is only possible because the node, not the server, owns identity.</p>
+
+  <h3>The gateway withholds the acknowledgement on</h3>
+  <ul>
+    <li>an undecodable payload,</li>
+    <li>a missing sequence number,</li>
+    <li>a SQLite insert failure &mdash; including disk-full,</li>
+    <li>failure to enqueue the upload job.</li>
+  </ul>
+  <p>Each leaves the reading in the node&rsquo;s queue for retransmission. The last of these was a
+  defect for most of the project&rsquo;s life (&sect;16).</p>
+
+  <div class="note alarm">
+    <span class="lbl">Sentinel collision &mdash; a bug worth reporting on its own</span>
+    <p>Sequence numbers must start at <strong>1</strong>, never 0, because 0 is also the initial
+    value of <code>lastAckedSeq</code>, and <code>ackUpTo()</code> opens with
+    <code>if (seq &lt;= lastAckedSeq) return;</code>. A reading numbered 0 can therefore never be
+    acknowledged. It pins the head of the queue and blocks every reading behind it, permanently.</p>
+    <p>This is only reachable on freshly-erased NVS &mdash; that is, on <em>every new
+    deployment</em>. A device that has been running a while never exhibits it; a
+    factory-fresh unit exhibits it every time. <code>restoreQueue()</code> now also discards any
+    seq-0 entry it finds, because the queue survives reflashes.</p>
+  </div>
+</section>
+
+<section id="s10">
+  <div class="sec-head"><span class="sec-num">10</span><h2 class="sec-title">Correct timestamps on a node with no clock</h2></div>
+  <p class="sec-sub">No RTC, no NTP. Two mechanisms, neither of which gates sampling or transmission.</p>
+
+  <p><strong>Mechanism A &mdash; pushed clock (<code>ep</code>).</strong> The gateway writes epoch
+  milliseconds to the TIME characteristic. The node stores an <em>offset</em> against
+  <code>millis()</code> rather than an absolute time, so the derived clock cannot drift away from
+  the monotonic ordering of readings. On receipt it also back-fills <code>ep</code> for readings
+  already queued <em>from the current boot</em>, guarded by a boot id so that readings carried
+  across a reboot are never given timestamps derived from a previous boot&rsquo;s uptime.</p>
+
+  <p><strong>Mechanism B &mdash; age since capture (<code>ag</code>).</strong> Every transmission
+  carries the elapsed milliseconds between capture and <em>that</em> transmission, from the
+  monotonic uptime counter. The gateway computes <code>timestamp = pi_now − ag</code>. It is
+  recomputed on every retransmission, so it stays correct no matter how long a reading sat in the
+  queue.</p>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h3>Timestamp provenance across 3,172 stored readings</h3>
+      <span class="badge b-meas">Measured</span>
+    </div>
+    <div class="tw"><table>
+      <thead><tr><th><code>sensor_status.time_source</code></th><th class="num">Rows</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>esp_clock</code></td><td class="num">1,209</td><td><code>ep</code> was non-zero, used directly</td></tr>
+        <tr><td><code>pi_clock_minus_age</code></td><td class="num">655</td><td>no node clock; reconstructed as <code>pi_now − ag</code></td></tr>
+        <tr><td><code>arrival_after_reboot</code></td><td class="num">5</td><td>carried the <code>r</code> flag; <code>ag</code> meaningless, arrival time used</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <p>All three paths are exercised in real data, and the provenance of every timestamp is recorded
+  in the row itself rather than assumed &mdash; which is worth something in a methods section.</p>
+
+  <p><strong>Validation.</strong> A synthetic reading injected with <code>ag = 30000</code> was
+  stored exactly 30 seconds before its arrival time: arrival 09:45:57, stored 09:45:27.
+  <span class="badge b-meas">Measured</span> Mechanism B is therefore accurate to the gateway&rsquo;s
+  own clock accuracy plus transmission latency &mdash; tens of milliseconds, far below the
+  3-second sampling interval.</p>
+
+  <div class="note">
+    <span class="lbl">The useful part</span>
+    <p>The pushed clock turned out to be <strong>unnecessary</strong>, and is now disabled by
+    default. Age-based reconstruction is sufficient and strictly more robust, because it has no
+    dependence on a successful GATT write &mdash; and GATT writes are the fragile half of this
+    link (&sect;01). A node with no RTC, no NTP and no clock at all still produces correctly
+    timestamped data, as long as the gateway knows the time. That is a cheap, generalisable
+    technique for cost- and power-constrained sensor nodes.</p>
+  </div>
+</section>
+
+<section id="s11">
+  <div class="sec-head"><span class="sec-num">11</span><h2 class="sec-title">Spending the flash budget deliberately</h2></div>
+
+  <p>Checkpointing the queue on every reading would be one write per 3 s &mdash;
+  <strong>28,800 writes per day</strong>. NVS wear-levels across its partition, but the underlying
+  flash is rated on the order of 10<sup>5</sup> erase cycles per sector; at that rate a 20 KiB
+  partition is being cycled hard enough to matter within months.</p>
+
+  <ul>
+    <li>The queue lives in <strong>RAM</strong>. NVS is a crash-safety checkpoint, not the store.</li>
+    <li>Checkpointing begins only once the backlog reaches 20 readings &mdash; about a minute,
+    i.e. evidence the gateway is actually gone &mdash; rate-limited to one write per minute, plus
+    one immediate checkpoint on unexpected disconnect.</li>
+    <li><strong>During normal operation the firmware performs zero flash writes.</strong></li>
+    <li>Sequence numbers come from pre-reserved blocks of 1,000, costing one NVS write per
+    ≈50 minutes rather than one per reading.</li>
+  </ul>
+
+  <div class="note warn">
+    <span class="lbl">Reading the data later</span>
+    <p>A reboot burns the remainder of the current sequence block, so <code>source_id</code> values
+    have <strong>gaps across reboots</strong>. This is harmless &mdash; the invariant required is
+    uniqueness and monotonicity, not contiguity &mdash; but gaps look exactly like data loss to an
+    analyst. Anyone working with the exported data needs to know this.</p>
+  </div>
+</section>
+
+<section id="s12">
+  <div class="sec-head"><span class="sec-num">12</span><h2 class="sec-title">Hardware inventory</h2></div>
+
+  <div class="panel">
+    <div class="panel-head"><h3>Edge node</h3></div>
+    <div class="tw"><table>
+      <tbody>
+        <tr><td>Module</td><td>ESP32-WROOM-32 on NodeMCU-32S &middot; PlatformIO board <code>nodemcu-32s</code></td></tr>
+        <tr><td>Resources</td><td>4 MB SPI flash, 320 KB usable DRAM, dual-core Xtensa LX6 @ 240 MHz</td></tr>
+        <tr><td>BLE MAC</td><td><code>94:3C:C6:DA:E7:A2</code> (Espressif OUI 94:3C:C6)</td></tr>
+        <tr><td>USB bridge</td><td>Silicon Labs CP210x, USB ID <code>10c4:ea60</code></td></tr>
+        <tr><td>Radio</td><td>BLE 4.2, NimBLE host</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><h3>Gateway</h3></div>
+    <div class="tw"><table>
+      <tbody>
+        <tr><td>Board</td><td>Raspberry Pi 5 Model B Rev 1.0</td></tr>
+        <tr><td>Controller</td><td><code>hci0</code>, BD <code>2C:CF:67:08:94:62</code>, Bus UART, ACL MTU 1021:8</td></tr>
+        <tr><td>Radio</td><td>Bluetooth 5.0, <strong>shared 2.4 GHz front-end with WiFi</strong></td></tr>
+        <tr><td>Storage</td><td>29 GB SD card, 28.7 GiB usable filesystem</td></tr>
+        <tr><td>Camera</td><td>Raspberry Pi Camera Module 3 (autofocus), via libcamera</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><h3>Sensors</h3></div>
+    <div class="tw"><table>
+      <thead><tr><th>Part</th><th>Measures</th><th>Interface</th></tr></thead>
+      <tbody>
+        <tr><td>MQ-135</td><td>VOC / CO&#8322;-equivalent</td><td>ADC1_CH6, GPIO 34</td></tr>
+        <tr><td>MQ-136</td><td>H&#8322;S</td><td>ADC1_CH7, GPIO 35</td></tr>
+        <tr><td>MQ-137</td><td>NH&#8323;</td><td>ADC1_CH4, GPIO 32</td></tr>
+        <tr><td>BME280</td><td>temperature, RH, pressure</td><td>I&#178;C 0x76, SDA 25 / SCL 26, chip ID 0x60</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <p>The firmware distinguishes chip ID 0x60 (BME280) from 0x58 (BMP280, pressure and temperature
+  only, <em>no humidity</em>) and reports which it found. The two parts are physically
+  interchangeable on clone breakout boards, and a BMP280 silently lacks the humidity channel &mdash;
+  a substitution that would corrupt an experiment without any obvious symptom.</p>
+
+  <div class="note alarm">
+    <span class="lbl">Thermal confound &mdash; affects any future spoilage study</span>
+    <p>Measured ambient temperature across the dataset ranged <strong>33.8&ndash;39.1 °C</strong>.
+    This is not refrigerated storage: it is open-bench ambient in a warm climate <em>plus</em>
+    self-heating from the MQ heater array, which runs continuously at roughly 150 mW per element,
+    physically adjacent to the BME280.</p>
+    <p>The temperature channel is currently measuring the enclosure, not the sample. For a
+    spoilage study the BME280 must be thermally separated from the heaters. This is a hardware
+    fix, not a software one, and it should be stated in any methods section.</p>
+  </div>
+</section>
+
+<section id="s13">
+  <div class="sec-head"><span class="sec-num">13</span><h2 class="sec-title">Software versions</h2></div>
+  <p class="sec-sub">Recorded exactly, because the §01 findings are specific to this pairing.</p>
+
+  <div class="panel">
+    <div class="panel-head"><h3>Gateway</h3></div>
+    <div class="panel-body">
+      <p style="margin:0"><span class="mono" style="font-size:14px">Raspberry Pi OS / Debian 13 (trixie) &middot; kernel 6.12.47+rpt-rpi-2712 aarch64 &middot;
+      Python 3.13.5 &middot; BlueZ 5.82 (D-Bus GATT API) &middot; bleak 3.0.2 &middot; dbus-fast 5.0.22 &middot;
+      streamlit 1.53.1 &middot; pandas 2.3.3 &middot; numpy 2.4.2 &middot; plotly 6.5.2 &middot;
+      requests 2.32.5 &middot; Pillow 12.1.0 &middot; SQLite via stdlib</span></p>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><h3>Edge node</h3></div>
+    <div class="panel-body">
+      <p style="margin:0"><span class="mono" style="font-size:14px">PlatformIO Core 6.1.19 &middot; platform espressif32@6.7.0 &middot; framework arduino &middot;
+      NimBLE-Arduino ^2.2.3 (2.x <code>NimBLEConnInfo</code> callback API) &middot; ArduinoJson ^6.21.0 &middot;
+      Adafruit BME280 ^2.2.4 &middot; Adafruit BusIO ^1.14.5</span></p>
+    </div>
+  </div>
+
+  <p>Stock ESP32 partition table (<code>default.csv</code>): <code>nvs</code> 0x5000 (20 KiB),
+  <code>otadata</code> 0x2000, <code>app0</code>/<code>app1</code> 0x140000 each,
+  <code>spiffs</code> 0x160000, <code>coredump</code> 0x10000. That 20 KiB NVS figure matters &mdash;
+  see &sect;17.</p>
+</section>
+
+<section id="s14">
+  <div class="sec-head"><span class="sec-num">14</span><h2 class="sec-title">Gas sensing circuit and its systematic error</h2></div>
+
+  <p>The MQ modules output 0&ndash;5 V on AOUT; the ESP32 ADC accepts 0&ndash;3.3 V. A resistive
+  divider scales it: R<sub>upper</sub> 68 kΩ, R<sub>lower</sub> 100 kΩ, ratio 1.68, with a 100 nF
+  capacitor stabilising the node.</p>
+
+  <p>The divider is <strong>not electrically free</strong>. It loads the module&rsquo;s own load
+  resistor, and the firmware accounts for this with an effective load resistance &mdash; a detail
+  commonly omitted in MQ-sensor work:</p>
+
+  <pre><code>R_L(module)    = 10 kΩ
+R_divider      = 68k + 100k = 168 kΩ
+R_L(effective) = (10k × 168k) / (10k + 168k) = 9.438 kΩ</code></pre>
+
+  <p>Using the nominal 10 kΩ instead introduces a <strong>5.95 % systematic error in RS</strong>,
+  which propagates through the power law with exponent 1/<em>b</em> to give
+  <strong>2.1&ndash;2.4 % in ppm</strong> depending on the gas.
+  <span class="badge b-calc">Calculated</span> Small, but a reproducible bias rather than noise.</p>
+
+  <h4>ADC conditioning</h4>
+  <p>The 68k/100k divider presents a high source impedance to the ESP32 SAR ADC, known for mux
+  and sample-and-hold artefacts. Mitigation: one throwaway conversion after channel switch to
+  discard sample-and-hold residue from the previously selected channel, 500 µs settle, then 32
+  averaged conversions at 250 µs spacing, 12-bit resolution, 11 dB attenuation.</p>
+
+  <h4>Conversion</h4>
+  <pre><code>V_node = (adc / 4095) × 3.3 × 1.68
+RS     = ((5.0 − V_node) / V_node) × R_L(effective)
+ppm    = ((RS / R0) / a) ^ (1 / b)</code></pre>
+
+  <div class="panel">
+    <div class="panel-head"><h3>Calibration constants &mdash; per-unit, must be re-established on other hardware</h3></div>
+    <div class="tw"><table>
+      <thead><tr><th>Sensor</th><th>Gas</th><th class="num">R&#8320; clean air (Ω)</th><th class="num">a</th><th class="num">b</th></tr></thead>
+      <tbody>
+        <tr><td>MQ-135</td><td>VOC</td><td class="num">193,200.00</td><td class="num">110.47</td><td class="num">&minus;2.862</td></tr>
+        <tr><td>MQ-136</td><td>H&#8322;S</td><td class="num">85,102.55</td><td class="num">44.947</td><td class="num">&minus;2.648</td></tr>
+        <tr><td>MQ-137</td><td>NH&#8323;</td><td class="num">51,913.09</td><td class="num">102.2</td><td class="num">&minus;2.473</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <div class="note alarm">
+    <span class="lbl">The weakest link in the measurement chain</span>
+    <p>R&#8320; is per-unit and drifts with sensor age and humidity. It was established once, in
+    ambient air, with no humidity or temperature compensation &mdash; while measured RH spanned
+    53.9&ndash;79.5 % in this dataset alone, and MQ-series response is strongly humidity-dependent.</p>
+    <p>Worse for interpretation: these sensors are <strong>cross-sensitive</strong>. MQ-135
+    responds to NH&#8323;, benzene, alcohol and smoke; MQ-136 responds to NH&#8323; and CO as well as
+    H&#8322;S. The firmware itself computes multiple candidate gases from the <em>same</em> MQ-135
+    and MQ-136 elements using different (a, b) pairs. Any claim that a channel measures a
+    <em>specific</em> gas needs a reference instrument or a controlled gas exposure to defend.</p>
+  </div>
+</section>
+
+<section id="s15">
+  <div class="sec-head"><span class="sec-num">15</span><h2 class="sec-title">Two threshold sets that disagree</h2></div>
+  <p class="sec-sub">A real inconsistency in the codebase, documented rather than quietly reconciled.</p>
+
+  <div class="panel">
+    <div class="panel-head"><h3>Edge &mdash; firmware, five labels, emitted per reading</h3></div>
+    <div class="panel-body">
+      <pre style="margin:0"><code>EXCELLENT : VOC &lt; 600  AND H2S &lt; 5   AND NH3 &lt; 50
+GOOD      : VOC &lt; 800  AND H2S &lt; 10  AND NH3 &lt; 100
+MODERATE  : VOC &lt; 1000 AND H2S &lt; 20  AND NH3 &lt; 200
+CRITICAL  : otherwise</code></pre>
+    </div>
+  </div>
+
+  <p><code>POOR</code> exists in the enum but is <strong>unreachable</strong> &mdash; the firmware
+  falls straight from MODERATE to CRITICAL. Either fix it or drop it before publishing the state
+  machine.</p>
+
+  <div class="panel">
+    <div class="panel-head"><h3>Gateway &mdash; per-channel bands used by the dashboard</h3></div>
+    <div class="tw"><table>
+      <thead><tr><th>Channel</th><th>Fresh</th><th>Warning</th><th>Critical</th></tr></thead>
+      <tbody>
+        <tr><td>H&#8322;S</td><td>&lt; 10 ppm</td><td>10&ndash;50</td><td>&gt; 50</td></tr>
+        <tr><td>NH&#8323;</td><td>&lt; 25 ppm</td><td>25&ndash;100</td><td>&gt; 100</td></tr>
+        <tr><td>VOC</td><td>&lt; 600 ppm</td><td>600&ndash;1000</td><td>&gt; 1000</td></tr>
+        <tr><td>Temperature</td><td>0&ndash;4 °C</td><td>&gt; 10 °C</td><td>&gt; 15 °C</td></tr>
+        <tr><td>Humidity</td><td>60&ndash;80 %</td><td>&lt; 50 % or &gt; 90 %</td><td>&mdash;</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <p>The firmware&rsquo;s H&#8322;S fresh bound is 5 ppm; the gateway&rsquo;s is 10. The
+  firmware&rsquo;s NH&#8323; fresh bound is 50 ppm; the gateway&rsquo;s is 25. They were derived at
+  different times from the reference paper and never reconciled. The five edge labels are then
+  mapped down to four dashboard states, so the pipeline carries a <strong>lossy 5 &rarr; 4
+  projection</strong>.</p>
+
+  <div class="note warn">
+    <span class="lbl">Integration constraint found only in production</span>
+    <p>The cloud API rejects any quality label outside
+    {EXCELLENT, GOOD, MODERATE, POOR, CRITICAL} with HTTP 400. An earlier firmware emitted
+    <code>FAIR</code> and <code>SPOILED</code> and was silently failing to upload &mdash; a good
+    example of a contract that no amount of local testing would have surfaced.</p>
+  </div>
+</section>
+
+<section id="s16">
+  <div class="sec-head"><span class="sec-num">16</span><h2 class="sec-title">Nine durability defects, classified</h2></div>
+  <p class="sec-sub">Every one was invisible in code review and appeared only on hardware — or only under adversarial reasoning.</p>
+
+  <ol class="defects">
+    <li><span class="dn">01</span><span>
+      <span class="dt">Sequence-number sentinel collision</span>
+      Reading 0 could never be acknowledged, pinning the queue head permanently.
+      <span class="dc"><b>Class</b> &nbsp;A sentinel colliding with a legitimate value in the same domain. Reachable only on a factory-fresh device.</span>
+    </span></li>
+    <li><span class="dn">02</span><span>
+      <span class="dt">Silent NVS overflow</span>
+      A 31,680-byte checkpoint written to a 20,480-byte partition. <code>putBytes</code> returned 0, unchecked, while the recorded length still promised the data.
+      <span class="dc"><b>Class</b> &nbsp;Unchecked return on a resource whose limit is defined outside the source file.</span>
+    </span></li>
+    <li><span class="dn">03</span><span>
+      <span class="dt">GATT write instability</span>
+      Per-reading acknowledgement drew <code>ATT 0x0E</code> and killed the link.
+      <span class="dc"><b>Class</b> &nbsp;A protocol-level assumption — writes are cheap and safe — invalidated by a specific stack pairing.</span>
+    </span></li>
+    <li><span class="dn">04</span><span>
+      <span class="dt">Flash write inside a radio callback</span>
+      NVS writes disable the flash cache for tens of milliseconds, stalling the NimBLE host task.
+      <span class="dc"><b>Class</b> &nbsp;Blocking operation in a latency-sensitive callback context.</span>
+    </span></li>
+    <li><span class="dn">05</span><span>
+      <span class="dt">ACK did not clear the in-flight marker</span>
+      After an acknowledgement cleared the queue head, the <em>new</em> head was judged in-flight against the previous send&rsquo;s timestamp and waited the full 4 s timeout. A backlog drained at one reading per four seconds instead of ~16 per second.
+      <span class="dc"><b>Class</b> &nbsp;Stale state after a state transition. Presented as poor throughput, not as a bug.</span>
+    </span></li>
+    <li><span class="dn">06</span><span>
+      <span class="dt"><code>pending_sync</code> never created by the schema initialiser</span>
+      It existed in the live database only as a leftover from an older schema. On a fresh install, readings would be stored locally and never uploaded.
+      <span class="dc"><b>Class</b> &nbsp;Schema drift between a long-lived deployment and a clean install. The deployed system worked; a new one would not.</span>
+    </span></li>
+    <li><span class="dn">07</span><span>
+      <span class="dt">Transient upload failures parked rows permanently</span>
+      A network error counted against a 20-attempt limit; after ~5 minutes of downtime rows were marked <code>failed</code>, and the fetch query only ever selected <code>pending</code>. Nothing retried a parked row.
+      <span class="dc"><b>Class</b> &nbsp;Conflating &ldquo;retryable&rdquo; with &ldquo;failed&rdquo;, plus a terminal state with no exit.</span>
+    </span></li>
+    <li><span class="dn">08</span><span>
+      <span class="dt">Enqueue failure swallowed and returned 0</span>
+      A reading could land in <code>sensor_readings</code>, fail to be queued for upload, and still be acknowledged — so the node discarded its only other copy of a reading the server would never see.
+      <span class="dc"><b>Class</b> &nbsp;Error suppression at a durability boundary.</span>
+    </span></li>
+    <li><span class="dn">09</span><span>
+      <span class="dt">Storage guard would not delete un-uploaded images</span>
+      A long uplink outage would fill the card, stall SQLite, stop acknowledgements, and overflow the node buffer — losing gas readings in order to preserve photographs.
+      <span class="dc"><b>Class</b> &nbsp;A local invariant (&ldquo;never delete unsent data&rdquo;) producing a globally worse outcome.</span>
+    </span></li>
+  </ol>
+
+  <div class="note">
+    <span class="lbl">The methodological point</span>
+    <p>Defects 06 through 09 were found by working through <em>&ldquo;what happens if X fails&rdquo;</em>
+    as an explicit exercise, not by testing. That is itself a finding: <strong>the durability bugs
+    were not reachable by normal testing, only by adversarial reasoning about the failure
+    envelope.</strong> A test suite exercising the happy path at any coverage level would have
+    passed all four.</p>
+  </div>
+</section>
+
+<section id="s17">
+  <div class="sec-head"><span class="sec-num">17</span><h2 class="sec-title">When the instrument lies</h2></div>
+  <p class="sec-sub">The largest single time cost in the project was not design or implementation — it was a compromised diagnostic channel.</p>
+
+  <h3>ModemManager versus the ESP32</h3>
+  <p>ModemManager probes newly-appearing serial devices with AT commands and toggles DTR/RTS. On
+  an ESP32 that asserts the auto-reset circuit. Symptoms observed:</p>
+  <ul>
+    <li>Apparently impossible serial data rates &mdash; <strong>38&ndash;62 KB/s measured on a
+    115200 baud line whose ceiling is 11.5 KB/s</strong>.</li>
+    <li>Truncated and interleaved log lines.</li>
+    <li>Boot banners never appearing.</li>
+    <li>Resets that made a healthy device look like it was crash-looping.</li>
+  </ul>
+
+  <p>Every attempt to observe the firmware produced misleading evidence. Fix, now shipped as a
+  udev rule:</p>
+  <pre><code>ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ENV{ID_MM_DEVICE_IGNORE}="1"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ENV{ID_MM_PORT_IGNORE}="1"</code></pre>
+
+  <h3>Kernel TTY buffering compounds it</h3>
+  <p>An unread serial port accumulates a large kernel buffer. Opening it later and reading
+  immediately returns stale backlog, which looks like a live flood. Any diagnostic reader must
+  <strong>drain to quiescence</strong> before treating what it sees as current. Several
+  apparently-contradictory observations during debugging were this artefact and nothing else.</p>
+
+  <h3>Bluetooth ships soft-blocked</h3>
+  <p><code>rfkill</code> had Bluetooth soft-blocked at boot; <code>hci0</code> showed DOWN despite
+  <code>bluetooth.service</code> being active. Required once, and persisted thereafter by
+  <code>systemd-rfkill</code>:</p>
+  <pre><code>sudo rfkill unblock bluetooth
+sudo sed -i 's/^#AutoEnable=true/AutoEnable=true/' /etc/bluetooth/main.conf</code></pre>
+
+  <h3>The NVS partition silently bounds the queue</h3>
+  <p>The stock table allocates <code>nvs</code> 20,480 bytes. The originally-designed 720-reading
+  checkpoint is 31,680 bytes &mdash; larger than the partition.
+  <code>Preferences::putBytes()</code> failed, returned 0, and the code did not check it, while
+  <code>q_len</code> was still written. The recorded length promised data the blob did not contain;
+  <code>restoreQueue()</code> found the mismatch and discarded everything. Eventually the node
+  wedged completely, with no serial output at all.</p>
+
+  <p>The attempted fix &mdash; a custom partition table with 64 KiB NVS, no OTA slots and a 3 MiB
+  app &mdash; <strong>made it worse</strong>: the application reset before producing any output,
+  <code>rst:0x3 (SW_RESET)</code> in a tight loop at ≈36 resets per second. It was not pursued.
+  The supported configuration is the stock table with a bounded 128-reading checkpoint, the return
+  value of <code>putBytes</code> checked, and <code>q_len</code> zeroed on failure so a partial
+  write can never masquerade as a good one.</p>
+
+  <div class="note">
+    <span class="lbl">Transferable</span>
+    <p>On ESP32 the persistent-storage budget is a partition-table constant most projects never
+    revisit, and exceeding it fails <em>silently</em> rather than exceptionally. More generally:
+    when a system misbehaves in ways that seem physically impossible &mdash; a 115200 baud line
+    delivering 62 KB/s &mdash; suspect the instrument before the system.</p>
+  </div>
+</section>
+
+<section id="s18">
+  <div class="sec-head"><span class="sec-num">18</span><h2 class="sec-title">Storage economics invert the intuition</h2></div>
+
+  <p><strong>Method.</strong> Marginal cost measured by inserting 3,000 synthetic readings into a
+  <em>fresh</em> SQLite database &mdash; reading row, queued upload payload and indexes &mdash; then
+  dividing by count. Measuring against the live database would have been wrong: it carries free
+  pages from earlier deletions and reports ≈11,876 B per reading, a <strong>17× overestimate</strong>.</p>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h3>Marginal storage cost per stream</h3>
+      <span class="badge b-meas">Measured</span>
+    </div>
+    <div class="tw"><table>
+      <thead><tr><th>Stream</th><th class="num">Unit</th><th class="num">Per hour</th><th class="num">Per day</th><th class="num">Per 72 h</th></tr></thead>
+      <tbody>
+        <tr><td>Sensor readings &middot; 3 s</td><td class="num">676 B</td><td class="num">792 KiB</td><td class="num">19 MiB</td><td class="num"><strong>56 MiB</strong></td></tr>
+        <tr><td>Camera images &middot; 30 s</td><td class="num">1.22 MiB</td><td class="num">146 MiB</td><td class="num">3.4 GiB</td><td class="num"><strong>10.3 GiB</strong></td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <div class="stats">
+    <div class="stat hl"><div class="v">1,892</div><div class="k">Readings per image</div></div>
+    <div class="stat hl"><div class="v">95 min</div><div class="k">Sensing per image</div></div>
+    <div class="stat amb"><div class="v">189&times;</div><div class="k">Image : sensor, 72 h</div></div>
+    <div class="stat amb"><div class="v">≈41 h</div><div class="k">To fill, uplink down</div></div>
+  </div>
+
+  <p>One image costs the same disk as <strong>1,892 sensor readings</strong> &mdash; roughly 95
+  minutes of gas sensing. Sensor data alone would run for <em>years</em> on a 29 GB card and is
+  never the storage constraint. Images are the entire problem.
+  <span class="badge b-calc">Calculated</span></p>
+
+  <h3>Reclaim order, safest first</h3>
+  <ol>
+    <li>Uploaded images in the archive &mdash; the server already holds them</li>
+    <li>Rotated logs and old database backups &mdash; oversized live logs are <em>truncated</em>,
+    not deleted, so services holding the file descriptor keep writing</li>
+    <li>Synced <code>sensor_readings</code> rows, oldest first</li>
+    <li>Oldest <strong>un-uploaded</strong> images &mdash; last resort only</li>
+  </ol>
+
+  <p><strong>Invariant: un-uploaded sensor data is never deleted.</strong> Row deletion is bounded
+  below by the lowest <code>sensor_readings.id</code> still queued for upload, with a hard floor of
+  10,000 rows retained regardless. If the space floor cannot be reached without touching
+  un-uploaded sensor data, the guard stops and logs an error rather than trading data for disk.</p>
+
+  <div class="note warn">
+    <span class="lbl">Justifying stage 4 &mdash; the only stage that deletes unsent data</span>
+    <p>Letting the card fill stops SQLite writes, which stops acknowledgements, which overflows the
+    node&rsquo;s one-hour buffer and loses <em>gas readings</em> &mdash; the primary measurement
+    &mdash; in order to preserve photographs. Shedding the oldest images is strictly the better
+    outcome. It is configurable off, in which case the guard fails loudly instead.</p>
+  </div>
+
+  <p><strong><code>VACUUM</code> safety.</strong> VACUUM rebuilds the database into a temporary copy
+  and briefly needs as much free space again as the file occupies. Running it while nearly full is
+  how a low-disk condition becomes a corrupt database. The guard skips VACUUM below 1.2× the
+  database size; deleted pages remain available for reuse, so writes continue either way.</p>
+
+  <div class="panel">
+    <div class="panel-head">
+      <h3>Reclaim invariants under simulated total disk exhaustion</h3>
+      <span class="badge b-meas">Measured</span>
+    </div>
+    <div class="panel-body">
+      <p>60 readings of which the newest 15 were un-uploaded, 6 archived images, 3 pending images,
+      <code>free_bytes</code> stubbed to 0 to force every stage:</p>
+      <pre style="margin-bottom:0"><code>[PASS] uploaded images reclaimed            (6 → 0)
+[PASS] NOT-yet-uploaded images untouched    (3 → 3)
+[PASS] every unsynced reading survived      (15/15, ids 46–60)
+[PASS] nothing at/above the unsynced floor deleted
+[PASS] min-rows floor respected
+[PASS] oldest deleted first                 (ids 1–45 removed)</code></pre>
+    </div>
+  </div>
+  <p>The guard also correctly refused to continue &mdash; logging <em>&ldquo;No further rows are
+  safe to delete&rdquo;</em> &mdash; and correctly skipped VACUUM for lack of space.</p>
+</section>
+
+<section id="s19">
+  <div class="sec-head"><span class="sec-num">19</span><h2 class="sec-title">The two pipelines share nothing but the card</h2></div>
+
+  <div class="panel">
+    <div class="tw"><table>
+      <thead><tr><th></th><th>Gas data</th><th>Images</th></tr></thead>
+      <tbody>
+        <tr><td>Producer</td><td>ESP32 over BLE &rarr; <code>ble_receiver.py</code></td><td><code>capture.py</code>, 30 s</td></tr>
+        <tr><td>Queue</td><td><code>pending_sync</code> table</td><td><code>sync_state.db</code> ledger</td></tr>
+        <tr><td>Uploader</td><td><code>cloud-uploader</code>, continuous</td><td><code>pi-image-sync.timer</code>, 1 min</td></tr>
+        <tr><td>Endpoint</td><td><code>…/api/meat-data</code></td><td><code>…/api/upload-image</code></td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <p>Separate processes, queues, endpoints and retry logic. One being blocked, throttled or
+  offline has no effect on the other. The only coupling was the shared SD card &mdash; so images
+  now carry a hard <strong>4 GiB budget</strong>, enforced on every storage pass
+  <em>independently of the free-space floor</em>. Images self-limit long before the disk is
+  threatened, which is what makes the independence real rather than nominal.</p>
+
+  <p><strong>Validated:</strong> with a 50 MiB test budget against 220 MiB of images, the guard
+  reclaimed 171 MiB from the uploaded archive and left every un-uploaded image untouched.
+  <span class="badge b-meas">Measured</span></p>
+
+  <p><strong>Image retention.</strong> <code>sync.py</code> previously called <code>unlink()</code>
+  after a successful upload. It now <em>moves</em> the file to an archive, so the gateway keeps its
+  own copy until space actually runs short. Name collisions resolve with a numeric suffix rather
+  than overwriting.</p>
+</section>
+
+<section id="s20">
+  <div class="sec-head"><span class="sec-num">20</span><h2 class="sec-title">The failure envelope</h2></div>
+
+  <div class="panel">
+    <div class="panel-head"><h3>What each failure costs</h3></div>
+    <div class="tw"><table>
+      <thead><tr><th>Failure</th><th>Behaviour</th><th>Data lost</th></tr></thead>
+      <tbody>
+        <tr><td>Server / internet down</td><td>Readings keep arriving and are stored; queue grows; uploader retries indefinitely and never parks for a network error</td><td><strong>None</strong>, until disk fills</td></tr>
+        <tr><td>Server rejects payload (4xx)</td><td>Row parked so it cannot block the queue; parked rows automatically requeued every 30 min</td><td><strong>None</strong></td></tr>
+        <tr><td>Server rate-limits (429)</td><td>Treated as retryable; batch pauses, resumes; uploads throttled 0.4 s apart to avoid provoking it</td><td><strong>None</strong></td></tr>
+        <tr><td>BLE link drops</td><td>Node retains unacknowledged readings, replays on reconnect; duplicates collapse</td><td><strong>None</strong></td></tr>
+        <tr><td>Gateway down</td><td>Node buffers 1 hour in RAM, oldest 128 checkpointed to flash</td><td><strong>None under 1 h</strong></td></tr>
+        <tr><td>Gateway power cut</td><td>Committed rows survive; node holds unacknowledged readings and re-sends</td><td><strong>None</strong></td></tr>
+        <tr><td>Node power cut</td><td>NVS checkpoint restores oldest 128 readings</td><td>Un-checkpointed remainder</td></tr>
+        <tr><td>Disk full</td><td>Insert raises &rarr; ACK withheld &rarr; node retains and re-sends; ingest stalls rather than dropping <span class="badge b-assert">By code path</span></td><td><strong>None</strong> while buffer holds</td></tr>
+        <tr><td>Both powered off</td><td>&mdash;</td><td>Everything during the outage</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <h3>Verified, not asserted</h3>
+  <ul>
+    <li><strong>Outage recovery.</strong> Uploader stopped for 90 s while ingest continued, building
+    a 34-reading backlog. On restart: 34 &rarr; 18 &rarr; 7 &rarr; <strong>0 within 45 s</strong>,
+    zero parked. <span class="badge b-meas">Measured</span></li>
+    <li><strong>Retry persistence.</strong> 25 consecutive drain cycles against a black-hole
+    endpoint (connection refused): all five test rows remained <code>pending</code> with
+    <code>retry_count=0</code>, nothing parked. Before the fix they would have been parked after 20
+    cycles and never retried. <span class="badge b-meas">Measured</span></li>
+    <li><strong>Disk-full ACK withholding.</strong> Reasoned from the implementation; not exercised
+    against a genuinely full disk. <span class="badge b-assert">By code path</span></li>
+    <li><strong>Power-cut recovery.</strong> Verified by configuration audit &mdash; all units
+    enabled, rfkill state persisted, <code>AutoEnable=true</code> &mdash; <em>not</em> by an actual
+    power cut. <span class="badge b-assert">By code path</span></li>
+  </ul>
+</section>
+
+<section id="s21">
+  <div class="sec-head"><span class="sec-num">21</span><h2 class="sec-title">Results and what the dataset actually is</h2></div>
+
+  <div class="stats">
+    <div class="stat"><div class="v">3,172</div><div class="k">Total readings</div></div>
+    <div class="stat hl"><div class="v">1,869</div><div class="k">Ingested over BLE</div></div>
+    <div class="stat"><div class="v">1,877</div><div class="k">Uploaded to server</div></div>
+    <div class="stat"><div class="v">2,286</div><div class="k">Images uploaded</div></div>
+    <div class="stat"><div class="v">0</div><div class="k">Pending at steady state</div></div>
+  </div>
+
+  <p><strong>Throughput.</strong> In a 180-second window the gateway ingested 79 readings while the
+  node generated 60 &mdash; draining backlog concurrently with live capture. Under systemd over a
+  90-second window: readings 1,535 &rarr; 1,617 (+82), server-synced 144 &rarr; 254 (+110), pending
+  falling 88 &rarr; 60. The uploader outpaces ingest.
+  <span class="badge b-meas">Measured</span></p>
+
+  <p><strong>Deduplication in practice.</strong> <code>stored=51 duplicates=5</code> over one
+  80-second session. Duplicates arose from reconnection overlap and were absorbed silently by the
+  UNIQUE index &mdash; direct evidence that the exactly-once property holds under real reconnection
+  churn, rather than only in principle.</p>
+
+  <div class="panel">
+    <div class="panel-head"><h3>Measured sensor ranges across the dataset</h3></div>
+    <div class="tw"><table>
+      <thead><tr><th>Channel</th><th class="num">Min</th><th class="num">Max</th></tr></thead>
+      <tbody>
+        <tr><td>Temperature</td><td class="num">33.8 °C</td><td class="num">39.1 °C</td></tr>
+        <tr><td>Relative humidity</td><td class="num">53.9 %</td><td class="num">79.5 %</td></tr>
+        <tr><td>MQ-135 VOC</td><td class="num">5.6 ppm</td><td class="num">8.7 ppm</td></tr>
+        <tr><td>MQ-136 H&#8322;S</td><td class="num">2.9 ppm</td><td class="num">4.4 ppm</td></tr>
+        <tr><td>MQ-137 NH&#8323;</td><td class="num">1.4 ppm</td><td class="num">3.1 ppm</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <div class="note alarm">
+    <span class="lbl">Read this before citing any of it</span>
+    <p>The quality label distribution is <strong>100 % EXCELLENT across all 3,172 readings</strong>.
+    There is no class variation whatsoever.</p>
+    <p>This is a <em>systems validation</em> dataset. It demonstrates that the pipeline transports,
+    timestamps, deduplicates, stores and uploads correctly. It is <strong>not</strong> a spoilage
+    dataset: it contains no meat, no spoilage progression and no ground-truth labels. Gas
+    concentrations sit near clean-air baseline throughout, consistent with sensors idling in
+    ambient laboratory air.</p>
+    <p>Nothing about classification accuracy, threshold validity, sensor discrimination or
+    freshness prediction can be claimed from this data. Those claims require a separate experiment
+    with actual samples, controlled storage temperature, a spoilage time course, and independent
+    ground truth &mdash; microbial plate counts, TVB-N, or a trained sensory panel.</p>
+  </div>
+
+  <p><strong>Link quality.</strong> RSSI &minus;13 to &minus;40 dBm, typically &minus;31 to
+  &minus;33 dBm at ≈25 cm. Negotiated ATT MTU 247. Payloads 146&ndash;163 bytes, one notification
+  each.</p>
+</section>
+
+<section id="s22">
+  <div class="sec-head"><span class="sec-num">22</span><h2 class="sec-title">Deployment</h2></div>
+
+  <div class="panel">
+    <div class="panel-head"><h3>systemd units, all enabled at boot</h3></div>
+    <div class="tw"><table>
+      <tbody>
+        <tr><td><code>meat-monitor-ble-receiver</code></td><td>ESP32 &rarr; BLE &rarr; SQLite. The ingest path</td></tr>
+        <tr><td><code>meat-monitor-cloud-uploader</code></td><td>SQLite &rarr; server, drains <code>pending_sync</code></td></tr>
+        <tr><td><code>meat-monitor-storage-guard</code></td><td>Enforces the 5 GiB floor and 4 GiB image budget</td></tr>
+        <tr><td><code>pi-image-capture</code></td><td>Camera capture, 30 s</td></tr>
+        <tr><td><code>pi-image-sync.timer</code></td><td>Image upload, 1 min, <code>Persistent=true</code></td></tr>
+        <tr><td><code>meat-monitor-dashboard</code></td><td>Streamlit, port 8502</td></tr>
+        <tr><td><code>meat-monitor-latest-view</code></td><td>Latest-image view, port 8600</td></tr>
+        <tr><td><code>pi-camera-feed</code></td><td>Live camera feed, port 5000</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+
+  <p>The BLE receiver depends on <code>bluetooth.service</code> and deliberately <strong>not</strong>
+  on the network &mdash; ingest must survive a total network outage. <code>Persistent=true</code> on
+  the image timer means missed runs are caught up after downtime.</p>
+
+  <div class="note warn">
+    <span class="lbl">Deduplication is valid only within one identity domain</span>
+    <p>The old polling client is disabled and now refuses to start without an explicit override.
+    Running it alongside the BLE receiver would store every reading <em>twice</em> under two
+    different <code>source_id</code> values &mdash; once keyed <code>ESP32-MeatMonitor:&lt;seq&gt;</code>
+    from BLE, once keyed by the server&rsquo;s own id from the polling path &mdash; which the UNIQUE
+    index cannot recognise as the same measurement.</p>
+  </div>
+
+  <h3>Unattended display</h3>
+  <p>A launcher installed to <code>~/.config/autostart/</code> opens both pages at login with no
+  manual step, run by <code>lxsession-xdg-autostart</code> from the labwc Wayland session. It waits
+  for each server to answer before opening the browser &mdash; a connection-error page after boot is
+  worse than a few seconds&rsquo; delay. Two implementation notes worth recording:</p>
+  <ul>
+    <li>Chromium exits immediately if it cannot find the compositor, so the script must export
+    <code>XDG_RUNTIME_DIR</code>, <code>WAYLAND_DISPLAY</code> and <code>DISPLAY</code> &mdash; an
+    autostart context can inherit a minimal environment.</li>
+    <li>A duplicate-launch guard using bare <code>pgrep -f &lt;profile-path&gt;</code> matches the
+    shell running the script, because the path appears in its own command line. The guard must
+    verify the matched process is actually Chromium by reading <code>/proc/&lt;pid&gt;/comm</code>.
+    The same self-matching trap caught <code>pkill</code> several times during debugging &mdash;
+    worth a footnote in any methods section describing shell-based process management.</li>
+  </ul>
+</section>
+
+<section id="s23">
+  <div class="sec-head"><span class="sec-num">23</span><h2 class="sec-title">Limitations and threats to validity</h2></div>
+  <p class="sec-sub">State these explicitly. Several are disqualifying for claims a reader might otherwise assume.</p>
+
+  <ol>
+    <li><strong>No spoilage data.</strong> All labels EXCELLENT; no class variation, no meat, no
+    ground truth. The dataset validates the system, not the science.</li>
+    <li><strong>MQ cross-sensitivity is unaddressed.</strong> The same elements compute multiple
+    gas concentrations with different coefficient pairs. Per-gas claims are not defensible without
+    a reference instrument.</li>
+    <li><strong>R&#8320; calibration is single-point and drifts.</strong> Established once in ambient
+    air, per unit, with no humidity or temperature compensation &mdash; while RH spanned
+    53.9&ndash;79.5 % in this dataset alone.</li>
+    <li><strong>BME280 thermally coupled to the MQ heaters.</strong> 33.8&ndash;39.1 °C is enclosure
+    temperature, not sample temperature.</li>
+    <li><strong>Threshold sets are inconsistent</strong> between firmware and gateway, and
+    <code>POOR</code> is unreachable.</li>
+    <li><strong>Single node, single gateway, single site.</strong> No replication, no
+    multi-device concurrency. BLE tested with one peripheral;
+    <code>CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1</code>.</li>
+    <li><strong>Short observation window.</strong> Continuous operation measured in hours, not the
+    72 h target. The 72 h storage figures are calculated from measured unit costs, not observed.</li>
+    <li><strong>Residual BLE reconnection churn is not root-caused.</strong> Not a data-loss path,
+    but an unexplained behaviour.</li>
+    <li><strong>Disk-full behaviour verified by code path</strong>, not by filling a disk.</li>
+    <li><strong>Power-cut recovery verified by configuration audit</strong>, not by an actual power
+    cut.</li>
+    <li><strong>BLE findings are specific to this stack pairing.</strong> BlueZ 5.82 / bleak 3.0.2 /
+    NimBLE 2.2.x. May not generalise to other centrals or to Bluedroid.</li>
+    <li><strong>Single-server dependency.</strong> One cloud host, no failover; &ldquo;backed
+    up&rdquo; means one remote copy.</li>
+  </ol>
+</section>
+
+<section id="s24">
+  <div class="sec-head"><span class="sec-num">24</span><h2 class="sec-title">What is defensible, and what is not</h2></div>
+
+  <div class="panel">
+    <div class="panel-head"><h3>Defensible from this work</h3><span class="badge b-meas">Supported</span></div>
+    <div class="panel-body">
+      <ul style="margin-bottom:0">
+        <li>An architecture in which the gateway, not the cloud, is the point of durability, with a
+        stated and mechanised delivery guarantee.</li>
+        <li>A store-and-forward protocol over BLE GATT with cumulative acknowledgement, and the
+        ordering argument that makes an acknowledgement mean &ldquo;durably stored&rdquo;.</li>
+        <li>Timestamp reconstruction on a node with no RTC and no NTP, with per-row provenance
+        recorded &mdash; and the observation that the pushed-clock mechanism proved unnecessary.</li>
+        <li>Flash-wear-aware persistence: zero flash writes in steady state.</li>
+        <li>Measured storage economics showing a 189× asymmetry between image and sensor streams,
+        and a budget-based isolation mechanism derived from it.</li>
+        <li><strong>The BlueZ/NimBLE interoperability findings with the measurement table.</strong>
+        In my judgement the most publishable single contribution here &mdash; directly useful to
+        other practitioners and not documented elsewhere that I could find.</li>
+        <li>A catalogue of durability defects reachable only by adversarial reasoning about the
+        failure envelope, not by testing.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><h3>Not defensible without further work</h3><span class="badge b-open">Unsupported</span></div>
+    <div class="panel-body">
+      <ul style="margin-bottom:0">
+        <li>Any classification accuracy, sensitivity, specificity or ROC figure.</li>
+        <li>Any claim that the thresholds correctly separate fresh from spoiled meat.</li>
+        <li>Any claim about shelf-life prediction or correlation with microbial load.</li>
+        <li>Any per-gas quantitative accuracy claim.</li>
+        <li>Any claim of 72 h continuous validated operation &mdash; projected, not observed.</li>
+        <li>Any general claim about &ldquo;BLE reliability&rdquo; beyond this stack pairing.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="s25">
+  <div class="sec-head"><span class="sec-num">25</span><h2 class="sec-title">Open questions</h2></div>
+
+  <ol>
+    <li><strong>Root-cause the ≈30 s reconnection churn.</strong> A <code>btmon</code> HCI capture
+    correlated against the node&rsquo;s serial log across a single disconnect would settle it.</li>
+    <li><strong>Test whether the write instability reproduces under Bluedroid</strong>, and with
+    other centrals. This determines whether &sect;01 is a NimBLE issue, a BlueZ issue, or an
+    interaction &mdash; and it is the fastest way to raise the finding&rsquo;s generality.</li>
+    <li><strong>Run the actual spoilage experiment.</strong> Controlled temperature, real samples,
+    time course, independent ground truth. Everything scientific depends on this.</li>
+    <li><strong>Humidity and temperature compensation</strong> for MQ readings, plus periodic
+    R&#8320; re-baselining.</li>
+    <li><strong>Thermally isolate the BME280</strong> from the heater array.</li>
+    <li><strong>Reconcile the two threshold sets</strong>, and either implement or remove
+    <code>POOR</code>.</li>
+    <li><strong>Verify power-cut recovery with a real power cut</strong>, and disk-full behaviour by
+    actually filling a disk.</li>
+    <li><strong>Extend the node buffer.</strong> 1,200 readings is the current limit; 2,400
+    overflowed DRAM by 22,832 bytes. A more compact on-node record &mdash; scaled 16-bit integers
+    instead of floats, ≈26 B versus 44 B &mdash; would roughly double capacity within the same RAM.</li>
+    <li><strong>Multi-node scaling.</strong> One peripheral, one connection today. Several nodes per
+    gateway changes the BLE scheduling picture substantially.</li>
+    <li><strong>A second backup destination</strong>, so &ldquo;backed up&rdquo; is not one remote
+    host.</li>
+  </ol>
+</section>
+
+<section id="s26">
+  <div class="sec-head"><span class="sec-num">26</span><h2 class="sec-title">Reproducibility</h2></div>
+
+  <ul>
+    <li>Repository <code>github.com/ThZihan/meat_quality</code>. BLE architecture on
+    <code>masterV4-ble-pi-ingest</code>; the WiFi/HTTP architecture preserved intact on
+    <code>masterV3-cloud-prodfix</code> for direct comparison.</li>
+    <li>Change scope between them: 29 files, +2,861 / &minus;991 lines. Firmware went from
+    ≈1,525 lines of WiFi/HTTP/portal code to a BLE-only implementation.</li>
+    <li>GATT UUIDs must stay byte-identical between the Python protocol module and the firmware
+    <code>#define</code>s; the module carries a comment saying so.</li>
+    <li>Host prerequisites: <code>rfkill unblock bluetooth</code>, <code>AutoEnable=true</code>, the
+    ModemManager udev rule, <code>pip install bleak</code>.</li>
+    <li>Sensor calibration constants are <strong>per-unit</strong> and must be re-established on
+    different hardware.</li>
+    <li>Full source record in <code>docs/PROJECT_FINDINGS.md</code>; architecture, field notes and
+    rollback procedure in <code>docs/BLE_ARCHITECTURE.md</code>.</li>
+  </ul>
+
+  <div class="note">
+    <span class="lbl">A note on method, possibly worth a paragraph of its own</span>
+    <p>The largest single time cost in this project was not design or implementation. It was that
+    the <em>diagnostic channel itself</em> was compromised, so early evidence actively misled.
+    Hours went into pursuing a phantom &ldquo;serial flood&rdquo; and an &ldquo;impossible data
+    rate&rdquo; that were artefacts of ModemManager interference and kernel TTY buffering.</p>
+    <p>The general lesson generalises well beyond this project: when a system misbehaves in ways
+    that seem physically impossible, suspect the instrument before the system.</p>
+  </div>
+</section>
+
+</main>
+</div>
+</div>
+
+<footer>
+  <div class="shell">
+    <p>Field report compiled from the working system on 2026-09-01. Every figure was measured on
+    the hardware described in &sect;12&ndash;13 unless marked
+    <span class="badge b-calc">Calculated</span> or <span class="badge b-assert">By code path</span>.
+    Arithmetic was re-derived before publication.</p>
+    <p class="mono">meat_quality &middot; masterV4-ble-pi-ingest<br>docs/PROJECT_FINDINGS.md</p>
+  </div>
+</footer>
+
+<script>
+(function(){
+  var links = Array.prototype.slice.call(document.querySelectorAll('.rail a'));
+  var map = {};
+  links.forEach(function(a){
+    var id = a.getAttribute('href').slice(1);
+    var el = document.getElementById(id);
+    if (el) map[id] = a;
+  });
+  var sections = Object.keys(map).map(function(id){ return document.getElementById(id); });
+  if (!('IntersectionObserver' in window) || !sections.length) return;
+
+  var visible = new Set();
+  var obs = new IntersectionObserver(function(entries){
+    entries.forEach(function(e){
+      if (e.isIntersecting) visible.add(e.target.id);
+      else visible.delete(e.target.id);
+    });
+    var first = null;
+    for (var i = 0; i < sections.length; i++) {
+      if (visible.has(sections[i].id)) { first = sections[i].id; break; }
+    }
+    links.forEach(function(a){ a.classList.remove('on'); });
+    if (first && map[first]) map[first].classList.add('on');
+  }, { rootMargin: '-8% 0px -70% 0px', threshold: 0 });
+
+  sections.forEach(function(s){ obs.observe(s); });
+})();
+</script>

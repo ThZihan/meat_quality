@@ -991,3 +991,18 @@ misled. Several hours were spent pursuing a phantom "serial flood" and an
 kernel TTY buffering. The general lesson: when a system misbehaves in ways that
 seem physically impossible (a 115200 baud line delivering 62 KB/s), suspect the
 instrument before the system.
+
+
+## 23. Published field report
+
+A designed, readable presentation of everything above — with the BlueZ/NimBLE
+interoperability trial matrix (§11) as its centrepiece — is published at:
+
+    https://claude.ai/code/artifact/881755c8-edbc-4799-abb7-2c8a7ec80f7f
+
+Source kept in `docs/ble-field-report.html` so the page is versioned with the
+code rather than existing only as a hosted artifact. It carries the same content
+as this file, organised for reading rather than for completeness, and marks every
+claim with its provenance: Measured (observed on this hardware), Calculated
+(derived from measured unit costs), By code path (reasoned from the
+implementation, not exercised), Unresolved (known behaviour, no root cause).
